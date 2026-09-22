@@ -89,7 +89,7 @@ class ClaudeAgent:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "CLAUDE_CODE_HARNESS": "barebones"},
+            env={**os.environ, "CLAUDE_CODE_HARNESS": "looper"},
             start_new_session=True,  # own process group, so a timeout kills children too
         )
 
