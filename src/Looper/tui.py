@@ -1,18 +1,26 @@
-"""Curses status viewer over the same SQLite state the CLI reads."""
+"""Curses status viewer over the same SQLite state the CLI reads.
+
+Embeds the daemon loop in a background thread so `looper tui` alone drives
+agents — no separate `looper daemon` process needed. Store is safe to share:
+it already uses check_same_thread=False plus an RLock (see state.py).
+"""
 
 from __future__ import annotations
 
+import asyncio
 import curses
-import time
+import logging
+import threading
 
-from . import orchestrator
 from .config import Config
-from .gh import GH, GHError
+from .orchestrator import Orchestrator
 from .state import State, Store, Task
 from .worktree import Worktrees
 
+log = logging.getLogger("looper.tui")
+
 REFRESH_MS = 2000
-HELP = "[j/k] move  [r] retry  [a] abandon  [c] clean worktree  [q] quit"
+HELP = "[j/k] move  [a] start agent  [r] retry  [x] abandon  [c] clean worktree  [q] quit"
 HEADER = f"{'ISSUE':>6}  {'STATE':<16} {'PR':>5}  {'IT':>2} {'SCORE':>5} {'BEST':>4} {'COST':>7}  TITLE"
 
 
@@ -35,27 +43,22 @@ def navigate(key: int, count: int, selected: int) -> int:
     return min(selected, count - 1)
 
 
-def sync_issues(gh: GH, cfg: Config, store: Store) -> int:
-    """Create a PENDING task for every trackable open issue not already tracked.
-
-    ponytail: one blocking `gh` call per cycle, on the UI thread — fine at
-    issue_poll_sec cadence; move to a background thread if input ever stutters.
-    """
-    created = 0
-    for issue in orchestrator.trackable_issues(gh, cfg, store):
-        if store.get(issue["number"]) is None:
-            store.create(issue["number"], issue.get("title", ""))
-            created += 1
-    return created
-
-
-def act(key: int, task: Task, store: Store, cfg: Config) -> str:
-    """Apply r/a/c to one task via the same Store calls the CLI uses. Returns a status line."""
+def act(key: int, task: Task, store: Store, cfg: Config,
+        orch: Orchestrator | None, loop: asyncio.AbstractEventLoop | None) -> str:
+    """Apply a/r/x/c to one task. a/r resume the daemon's own spawn machinery
+    (loop.call_soon_threadsafe -> Orchestrator._spawn) instead of duplicating it."""
+    if key == ord("a"):
+        if task.is_terminal:
+            state = State.PR_OPEN if task.pr_number else State.PENDING
+            store.set_state(task.issue_number, state, "started from tui", error=None)
+        if orch is not None and loop is not None:
+            loop.call_soon_threadsafe(orch._spawn, task.issue_number)
+        return f"#{task.issue_number} solving"
     if key == ord("r"):
         state = State.PR_OPEN if task.pr_number else State.PENDING
         store.set_state(task.issue_number, state, "retried from tui", error=None)
         return f"#{task.issue_number} -> {state}"
-    if key == ord("a"):
+    if key == ord("x"):
         store.set_state(task.issue_number, State.PARKED, "abandoned from tui",
                          error="abandoned by operator")
         return f"#{task.issue_number} parked"
@@ -90,23 +93,13 @@ def _draw(win, cfg: Config, tasks: list[Task], selected: int, status: str) -> No
     win.refresh()
 
 
-def _loop(win, cfg: Config, store: Store) -> None:
+def _loop(win, cfg: Config, store: Store,
+          orch: Orchestrator, loop: asyncio.AbstractEventLoop) -> None:
     curses.curs_set(0)
     win.timeout(REFRESH_MS)
     selected = 0
     status = ""
-    gh = GH(cfg.repo.slug)
-    next_poll = 0.0  # poll immediately on first iteration
     while True:
-        now = time.monotonic()
-        if now >= next_poll:
-            next_poll = now + cfg.loop.issue_poll_sec
-            try:
-                if created := sync_issues(gh, cfg, store):
-                    status = f"discovered {created} new issue(s)"
-            except GHError as exc:
-                status = f"issue poll failed: {exc}"
-
         tasks = store.all_tasks()
         selected = navigate(-1, len(tasks), selected)  # clamp after tasks may have shrunk
         _draw(win, cfg, tasks, selected, status)
@@ -117,15 +110,30 @@ def _loop(win, cfg: Config, store: Store) -> None:
             return
         if key in (curses.KEY_UP, curses.KEY_DOWN, ord("j"), ord("k")):
             selected = navigate(key, len(tasks), selected)
-        elif key in (ord("r"), ord("a"), ord("c")) and tasks:
-            status = act(key, tasks[selected], store, cfg)
+        elif key in (ord("a"), ord("r"), ord("x"), ord("c")) and tasks:
+            status = act(key, tasks[selected], store, cfg, orch, loop)
+
+
+def _run_daemon_thread(loop: asyncio.AbstractEventLoop, orch: Orchestrator) -> None:
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(orch.run_daemon(install_signals=False))
+    except Exception:
+        log.exception("embedded daemon loop crashed")
+    finally:
+        loop.close()
 
 
 def run(cfg: Config) -> int:
-    cfg.ensure_dirs()
-    store = Store(cfg.db_path)
+    from .cli import build  # local: cli imports tui lazily too, avoid a module-level cycle
+    store, _gh, _wt, orch = build(cfg)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=_run_daemon_thread, args=(loop, orch), daemon=True)
+    thread.start()
     try:
-        curses.wrapper(_loop, cfg, store)
+        curses.wrapper(_loop, cfg, store, orch, loop)
     finally:
+        loop.call_soon_threadsafe(orch.shutdown.set)
+        thread.join(timeout=15)
         store.close()
     return 0

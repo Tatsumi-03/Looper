@@ -80,10 +80,11 @@ class Orchestrator:
         await asyncio.to_thread(self.gh.preflight)
         return await self.drive(issue_number)
 
-    async def run_daemon(self) -> None:
+    async def run_daemon(self, *, install_signals: bool = True) -> None:
         self.cfg.ensure_dirs()
         await asyncio.to_thread(self.gh.preflight)
-        self._install_signals()
+        if install_signals:
+            self._install_signals()
         log.info("daemon up: repo=%s concurrency=%d target=%d/5 dry_run=%s",
                  self.cfg.repo.slug, self.cfg.loop.max_concurrent_agents,
                  self.cfg.greptile.target_score, self.cfg.safety.dry_run)
