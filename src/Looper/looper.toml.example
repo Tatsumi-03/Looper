@@ -6,7 +6,7 @@ base_branch = "main"
 
 [agent]
 claude_bin = "claude"
-model = "opus"
+model = "sonnet"
 max_turns = 60
 max_budget_usd = 5.0          # ceiling for a single claude run
 run_timeout_sec = 3600

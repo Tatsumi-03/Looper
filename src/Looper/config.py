@@ -24,7 +24,7 @@ class RepoCfg:
 @dataclass
 class AgentCfg:
     claude_bin: str = "claude"
-    model: str = "opus"
+    model: str = "sonnet"
     max_turns: int = 60
     max_budget_usd: float = 5.0
     run_timeout_sec: int = 3600
