@@ -204,6 +204,12 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tui(args: argparse.Namespace) -> int:
+    cfg = config_mod.load(args.config)
+    from . import tui
+    return tui.run(cfg)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     ok = True
     try:
@@ -309,6 +315,9 @@ def main(argv: list[str] | None = None) -> int:
 
     doc = sub.add_parser("doctor", help="check config, tools and GitHub access")
     doc.set_defaults(fn=cmd_doctor)
+
+    tu = sub.add_parser("tui", help="live curses view over task state")
+    tu.set_defaults(fn=cmd_tui)
 
     args = p.parse_args(argv)
     setup_logging(args.verbose)
