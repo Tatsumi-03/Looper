@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Run Looper without installing it.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHONPATH="$here/src${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m Looper "$@"
