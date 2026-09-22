@@ -1,2 +1,2 @@
-go to AGENT.md
+read AGENT.md
 
