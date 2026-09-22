@@ -59,6 +59,27 @@ def trackable_issues(gh: GH, cfg: Config, store: Store) -> list[dict[str, Any]]:
     return out
 
 
+def check_merged(gh: GH, store: Store) -> int:
+    """Flip finished tasks to MERGED once a human lands their PR.
+
+    Merging closes the issue, so it drops out of `list_open_issues` and the poll
+    loop stops seeing it — the PR has to be asked about directly.
+
+    ponytail: one `gh pr view` per finished task per cycle. Fine for the handful
+    of tasks this tool expects; batch through a GraphQL search if it ever grows.
+    """
+    merged = 0
+    for task in store.all_tasks():
+        if not task.is_terminal or task.state == State.MERGED or not task.pr_number:
+            continue
+        pr = gh.pr(task.pr_number)
+        if (pr or {}).get("state") == "MERGED":
+            store.set_state(task.issue_number, State.MERGED, f"PR #{task.pr_number} merged")
+            log.info("#%s: PR #%s merged", task.issue_number, task.pr_number)
+            merged += 1
+    return merged
+
+
 class Orchestrator:
     def __init__(self, cfg: Config, store: Store, gh: GH, wt: Worktrees, agent: ClaudeAgent):
         self.cfg = cfg
@@ -142,6 +163,7 @@ class Orchestrator:
 
     async def _poll_issues(self) -> None:
         issues = await asyncio.to_thread(trackable_issues, self.gh, self.cfg, self.store)
+        await asyncio.to_thread(check_merged, self.gh, self.store)
         self._heartbeat(len(issues))
         for issue in issues:
             if self.shutdown.is_set():

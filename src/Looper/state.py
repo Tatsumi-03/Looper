@@ -23,10 +23,11 @@ class State(StrEnum):
     SCORED = "SCORED"
     REVISING = "REVISING"
     READY_FOR_HUMAN = "READY_FOR_HUMAN"
+    MERGED = "MERGED"
     PARKED = "PARKED"
 
 
-TERMINAL = {State.READY_FOR_HUMAN, State.PARKED}
+TERMINAL = {State.READY_FOR_HUMAN, State.MERGED, State.PARKED}
 #: states from which a restarted daemon re-enters the review loop rather than re-solving
 POST_PR = {State.PR_OPEN, State.AWAITING_REVIEW, State.SCORED, State.REVISING, State.PUSHED}
 

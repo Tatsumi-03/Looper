@@ -161,7 +161,9 @@ def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
     log_scroll = 0
     status = ""
     while True:
-        tasks = store.all_tasks()
+        # merged work is done work — it stays in the db and in `looper status`,
+        # but the tui is a worklist, not a history
+        tasks = [t for t in store.all_tasks() if t.state != State.MERGED]
         selected = navigate(-1, len(tasks), selected)  # clamp after tasks may have shrunk
         lines = list(log_buf)
         h, _w = win.getmaxyx()
