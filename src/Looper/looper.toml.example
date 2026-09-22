@@ -1,0 +1,48 @@
+# Copy to looper.toml and edit. `looper init --repo owner/name` does this for you.
+
+[repo]
+slug = "owner/name"
+base_branch = "main"
+
+[agent]
+claude_bin = "claude"
+model = "opus"
+max_turns = 60
+max_budget_usd = 5.0          # ceiling for a single claude run
+run_timeout_sec = 3600
+permission_mode = "acceptEdits"
+allowed_tools = [
+  "Read", "Edit", "Write", "Grep", "Glob", "TodoWrite",
+  "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)",
+  "Bash(git diff:*)", "Bash(git log:*)", "Bash(git restore:*)",
+  "Bash(ls:*)", "Bash(cat:*)", "Bash(rg:*)", "Bash(find:*)",
+  "Bash(npm:*)", "Bash(npx:*)", "Bash(pnpm:*)", "Bash(yarn:*)",
+  "Bash(python:*)", "Bash(python3:*)", "Bash(pytest:*)", "Bash(make:*)",
+  "Bash(go:*)", "Bash(cargo:*)",
+]
+disallowed_tools = [
+  "Bash(git push:*)", "Bash(git remote:*)", "Bash(git reset --hard:*)",
+  "Bash(gh:*)", "Bash(rm -rf:*)", "Bash(sudo:*)",
+]
+
+[loop]
+max_concurrent_agents = 3
+max_iterations = 5            # review rounds before parking the task
+max_open_prs = 5
+issue_poll_sec = 60
+skip_labels = ["no-agent", "wontfix", "blocked", "question"]
+
+[greptile]
+bot_logins = ["greptile-apps[bot]", "greptile[bot]", "greptile-apps-staging[bot]"]
+poll_interval_sec = 20
+review_timeout_sec = 1200
+max_retriggers = 2
+retrigger_body = "@greptileai review"
+target_score = 5
+fake_scores = []              # e.g. [3, 4, 5] to exercise the loop without Greptile
+
+[safety]
+dry_run = false
+branch_prefix = "agent/issue-"
+auto_merge = false            # intentionally off: a human merges
+max_cost_per_issue_usd = 25.0
