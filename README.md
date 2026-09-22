@@ -27,13 +27,59 @@ issue ──► claim ──► worktree ──► agent solves ──► push �
 - [`claude`](https://claude.com/claude-code) on `PATH` and logged in
 - The Greptile GitHub App installed on the target repo
 
-## Quick start
+## Install
+
+Everything above under [Requirements](#requirements) has to be in place first —
+Looper itself pulls in nothing else.
+
+**1. Clone it**
+
+```bash
+git clone https://github.com/<you>/Looper.git
+cd Looper
+```
+
+**2. Check your Python**
+
+```bash
+python3 --version        # needs 3.11 or newer
+```
+
+**3. Pick how you want to run it**
+
+Straight from the checkout, no install:
+
+```bash
+./looper --help
+```
+
+Or put a `looper` command on your `PATH` (a venv keeps it off your system Python):
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/looper --help
+```
+
+**4. Point it at a repo**
 
 ```bash
 ./looper init --repo owner/name        # writes looper.toml
-$EDITOR looper.toml
-./looper doctor                        # checks gh, git, claude, repo access
+$EDITOR looper.toml                    # model, budgets, concurrency, skip labels
+```
 
+**5. Check your setup**
+
+```bash
+./looper doctor                        # verifies config, gh, git, claude, repo access
+```
+
+Every line should say `ok`. A `FAIL` here tells you exactly which requirement is
+missing before anything touches a real repo.
+
+## Quick start
+
+```bash
 # rehearsal: no push, no PR, no comments
 ./looper once 123 --dry-run
 
@@ -42,16 +88,16 @@ $EDITOR looper.toml
 
 # the real thing
 ./looper once 123                      # one issue, foreground
-./looper daemon                        # watch every open issue
+./looper daemon                        # watch every open issue, headless
+./looper tui                           # same, with a live dashboard
 ```
-
-`pip install -e .` gives you a `looper` command on `PATH`.
 
 ## Commands
 
 | command | what it does |
 |---|---|
 | `daemon` | poll open issues and work them continuously |
+| `tui` | the daemon plus a live dashboard: task table, agent controls, scrollable log |
 | `once <issue>` | drive a single issue end to end in the foreground |
 | `status` | table of every task: state, PR, score, cost |
 | `show <issue>` | full detail plus the event log for one issue |
@@ -69,10 +115,14 @@ or opening a second PR.
 
 ```
 PENDING → CLAIMED → WORKTREE → SOLVING → PUSHED → PR_OPEN
-        → AWAITING_REVIEW → SCORED ─┬─ 5/5 ─→ READY_FOR_HUMAN
+        → AWAITING_REVIEW → SCORED ─┬─ 5/5 ─→ READY_FOR_HUMAN ─→ MERGED
                                     └─ <5 ──→ REVISING → PUSHED → …
                                                       → PARKED (needs a human)
 ```
+
+`MERGED` is set by the poll loop once a human lands the PR — merging closes the issue,
+so it drops out of the open-issue listing and the PR has to be asked about directly.
+The TUI hides merged tasks; `looper status` keeps them as history.
 
 **The agent never talks to GitHub.** It edits files and commits inside its worktree; that is
 all. Looper owns `git push`, the PR, and every comment and label. `gh` and `git push`
@@ -138,16 +188,28 @@ src/Looper/
   worktree.py      base clone, per-issue worktrees, guarded push
   agent.py         Claude Code headless driver
   greptile.py      score parsing, freshness, re-trigger
+  tui.py           curses dashboard; embeds the daemon in a background thread
   prompts/         solve_issue.md, address_review.md
 var/               db, logs, worktrees, clones  (gitignored)
 ```
 
-A TUI (`looper tui`, terminal-only status/control view over the same SQLite state) is
-the next thing being built on top of this engine — see `AGENT.md` for the shape of the
-project.
-
 Agent transcripts land in `var/logs/issue-<n>/` — the prompt, the full `stream-json`
 transcript, and the review text for every round.
+
+## TUI
+
+`looper tui` runs the daemon itself, so it replaces `looper daemon` rather than
+watching one. The task table is on top, a scrollable daemon log below it.
+
+| key | what it does |
+|---|---|
+| `j` / `k` | move down / up the task list |
+| `a` | start an agent on the selected issue now (un-parks it first if needed) |
+| `r` | reset a task's state and let the next poll cycle pick it up |
+| `x` | park a task by hand |
+| `c` | delete a finished task's worktree |
+| `PgUp` / `PgDn` | scroll the log; `PgDn` back to the bottom resumes following |
+| `q` | quit |
 
 ## Tests
 
