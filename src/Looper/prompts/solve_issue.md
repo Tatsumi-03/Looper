@@ -4,6 +4,13 @@ Repository: {{REPO}}
 Worktree:   {{WORKTREE}}
 Branch:     {{BRANCH}} (already checked out, branched from origin/{{BASE_BRANCH}})
 
+
+# Development preferences
+
+Channel both "measure twice, cut once" , "yagni" and "you only write once" principles. Fight scope creep. Try to honor the dev's intent in both a minimal and realistic fashion.
+
+use approprite skills where needed.if no skills present then so be it.
+
 # Your task
 
 Resolve this GitHub issue completely.
@@ -30,6 +37,7 @@ Resolve this GitHub issue completely.
    Commit everything you meant to keep — Looper commits whatever is left in the
    worktree, so delete scratch files and temp directories before you finish or they
    end up in the pull request.
+6. always follow the 'yagni', 'measure twice, cut once' and 'ou only write once' principles.
 
 # Hard rules
 
@@ -51,7 +59,7 @@ If the issue is too vague to implement, is a question rather than a defect, is
 already fixed on this branch, or asks for something you cannot verify, then make
 NO commits and end your final message with exactly:
 
-HARNESS_ABORT: <one-line reason>
+LOOPER_ABORT: <one-line reason>
 
 # The pull request description is yours to write
 

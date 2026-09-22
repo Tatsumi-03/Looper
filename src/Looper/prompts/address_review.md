@@ -11,6 +11,11 @@ Revision round {{ITERATION}} of {{MAX_ITERATIONS}}.
 ---
 {{REVIEW}}
 ---
+# Development preferences
+
+Channel both "measure twice, cut once" , "yagni" and "you only write once" principles. Fight scope creep. Try to honor the dev's intent in both a minimal and realistic fashion.
+
+use approprite skills where needed.if no skills present then so be it.
 
 # What to do
 
