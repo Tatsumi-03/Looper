@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import curses
+import time
 
+from . import orchestrator
 from .config import Config
+from .gh import GH, GHError
 from .state import State, Store, Task
 from .worktree import Worktrees
 
@@ -30,6 +33,20 @@ def navigate(key: int, count: int, selected: int) -> int:
     if key in (curses.KEY_DOWN, ord("j")):
         return min(count - 1, selected + 1)
     return min(selected, count - 1)
+
+
+def sync_issues(gh: GH, cfg: Config, store: Store) -> int:
+    """Create a PENDING task for every trackable open issue not already tracked.
+
+    ponytail: one blocking `gh` call per cycle, on the UI thread — fine at
+    issue_poll_sec cadence; move to a background thread if input ever stutters.
+    """
+    created = 0
+    for issue in orchestrator.trackable_issues(gh, cfg, store):
+        if store.get(issue["number"]) is None:
+            store.create(issue["number"], issue.get("title", ""))
+            created += 1
+    return created
 
 
 def act(key: int, task: Task, store: Store, cfg: Config) -> str:
@@ -78,7 +95,18 @@ def _loop(win, cfg: Config, store: Store) -> None:
     win.timeout(REFRESH_MS)
     selected = 0
     status = ""
+    gh = GH(cfg.repo.slug)
+    next_poll = 0.0  # poll immediately on first iteration
     while True:
+        now = time.monotonic()
+        if now >= next_poll:
+            next_poll = now + cfg.loop.issue_poll_sec
+            try:
+                if created := sync_issues(gh, cfg, store):
+                    status = f"discovered {created} new issue(s)"
+            except GHError as exc:
+                status = f"issue poll failed: {exc}"
+
         tasks = store.all_tasks()
         selected = navigate(-1, len(tasks), selected)  # clamp after tasks may have shrunk
         _draw(win, cfg, tasks, selected, status)

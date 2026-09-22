@@ -1,8 +1,16 @@
 import curses
 
-from Looper.config import Config, RepoCfg
+from Looper.config import Config, LoopCfg, RepoCfg
 from Looper.state import State, Store
-from Looper.tui import act, navigate
+from Looper.tui import act, navigate, sync_issues
+
+
+class FakeGH:
+    def __init__(self, issues):
+        self._issues = issues
+
+    def list_open_issues(self):
+        return self._issues
 
 
 def test_navigate_clamps_and_moves():
@@ -27,6 +35,24 @@ def test_act_retry_and_abandon(tmp_path):
     msg = act(ord("a"), store.get(1), store, cfg)
     assert store.get(1).state == State.PARKED
     assert "parked" in msg
+    store.close()
+
+
+def test_sync_issues_creates_new_and_skips_labelled_and_tracked(tmp_path):
+    store = Store(tmp_path / "looper.db")
+    cfg = Config(repo=RepoCfg(slug="o/n"), loop=LoopCfg(skip_labels=["wontfix"]), root=tmp_path)
+    store.create(1, "already tracked")  # pre-existing task
+    gh = FakeGH([
+        {"number": 1, "title": "already tracked", "labels": []},
+        {"number": 2, "title": "new issue", "labels": []},
+        {"number": 3, "title": "skip me", "labels": [{"name": "wontfix"}]},
+    ])
+
+    created = sync_issues(gh, cfg, store)
+
+    assert created == 1
+    assert store.get(2) is not None
+    assert store.get(3) is None
     store.close()
 
 

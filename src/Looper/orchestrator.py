@@ -40,6 +40,25 @@ def render(template: str, **vars: Any) -> str:
     return text
 
 
+def trackable_issues(gh: GH, cfg: Config, store: Store) -> list[dict[str, Any]]:
+    """Open issues not skip-labelled and not already claimed by another runner.
+
+    Shared by the daemon's poll loop and the TUI's own issue discovery, so both
+    apply the same skip-label / in-progress rules instead of drifting apart.
+    """
+    out = []
+    for issue in gh.list_open_issues():
+        labels = {l["name"].lower() for l in issue.get("labels", [])}
+        if labels & {s.lower() for s in cfg.loop.skip_labels}:
+            continue
+        if LABEL_IN_PROGRESS in labels and store.get(issue["number"]) is None:
+            log.info("#%s already labelled %s by another runner — skipping",
+                     issue["number"], LABEL_IN_PROGRESS)
+            continue
+        out.append(issue)
+    return out
+
+
 class Orchestrator:
     def __init__(self, cfg: Config, store: Store, gh: GH, wt: Worktrees, agent: ClaudeAgent):
         self.cfg = cfg
@@ -121,20 +140,13 @@ class Orchestrator:
                  working, done, parked, spend)
 
     async def _poll_issues(self) -> None:
-        issues = await asyncio.to_thread(self.gh.list_open_issues)
+        issues = await asyncio.to_thread(trackable_issues, self.gh, self.cfg, self.store)
         self._heartbeat(len(issues))
         for issue in issues:
             if self.shutdown.is_set():
                 return
             number = issue["number"]
             if number in self._running:
-                continue
-            labels = {l["name"].lower() for l in issue.get("labels", [])}
-            if labels & {s.lower() for s in self.cfg.loop.skip_labels}:
-                continue
-            if LABEL_IN_PROGRESS in labels and self.store.get(number) is None:
-                log.info("#%s already labelled %s by another runner — skipping",
-                         number, LABEL_IN_PROGRESS)
                 continue
             task = self.store.get(number)
             if task and task.is_terminal:
