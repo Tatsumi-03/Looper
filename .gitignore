@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Looper local/live config (repo-specific, never checked in)
+looper.toml
