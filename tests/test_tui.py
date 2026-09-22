@@ -2,7 +2,29 @@ import curses
 
 from Looper.config import Config, RepoCfg
 from Looper.state import State, Store
-from Looper.tui import act, navigate
+from Looper.tui import act, navigate, scroll_log, visible_log
+
+
+def test_visible_log_shows_tail_by_default():
+    lines = [str(i) for i in range(20)]
+    assert visible_log(lines, height=5, scroll=0) == ["15", "16", "17", "18", "19"]
+    assert visible_log(lines, height=5, scroll=5) == ["10", "11", "12", "13", "14"]
+    assert visible_log([], height=5, scroll=0) == []
+    assert visible_log(lines, height=0, scroll=0) == []
+
+
+def test_scroll_log_pages_and_clamps():
+    total, height = 20, 5
+    scroll = scroll_log(curses.KEY_PPAGE, total, height, 0)
+    assert scroll == 5
+    scroll = scroll_log(curses.KEY_PPAGE, total, height, scroll)
+    assert scroll == 10  # top: total - height
+    scroll = scroll_log(curses.KEY_PPAGE, total, height, scroll)
+    assert scroll == 15                                   # clamped at top
+    scroll = scroll_log(curses.KEY_NPAGE, total, height, scroll)
+    assert scroll == 10
+    scroll = scroll_log(curses.KEY_NPAGE, total, height, 2)
+    assert scroll == 0                                    # clamped at live tail
 
 
 def test_navigate_clamps_and_moves():
