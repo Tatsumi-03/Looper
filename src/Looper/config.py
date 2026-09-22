@@ -87,7 +87,7 @@ class Config:
 
     @property
     def db_path(self) -> Path:
-        return self.var_dir / "harness.db"
+        return self.var_dir / "looper.db"
 
     @property
     def logs_dir(self) -> Path:
@@ -127,12 +127,12 @@ def _build(cls: type, data: dict[str, Any], section: str) -> Any:
 
 
 def load(path: str | Path | None = None, root: Path | None = None) -> Config:
-    """Load harness.toml. Falls back to ./harness.toml."""
+    """Load looper.toml. Falls back to ./looper.toml."""
     root = Path(root or Path.cwd()).resolve()
-    cfg_path = Path(path) if path else root / "harness.toml"
+    cfg_path = Path(path) if path else root / "looper.toml"
     if not cfg_path.exists():
         raise ConfigError(
-            f"no config at {cfg_path} — copy harness.toml.example or run `harness init --repo owner/name`"
+            f"no config at {cfg_path} — copy looper.toml.example or run `looper init --repo owner/name`"
         )
     raw = tomllib.loads(cfg_path.read_text())
 
