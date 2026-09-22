@@ -1,0 +1,19 @@
+[project]
+name = "looper"
+version = "0.1.0"
+description = "Loop-engineering TUI: drives Claude Code agents from GitHub issue to a Greptile-approved PR"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+looper = "Looper.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+Looper = ["prompts/*.md", "looper.toml.example"]
