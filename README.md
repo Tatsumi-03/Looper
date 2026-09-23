@@ -4,8 +4,8 @@ A daemon that turns open GitHub issues into merge-ready pull requests, watched f
 
 For each open issue it spawns a Claude Code agent in its own git worktree, opens a PR,
 waits for [Greptile](https://greptile.com)'s review, and feeds the findings back to the
-agent — round after round — until Greptile's confidence score hits **5/5**. Then it
-labels the PR `agent:ready` and stops. A human merges.
+agent — round after round — until Greptile's confidence score hits **5/5** and CI is
+green. Then it labels the PR `agent:ready` and stops. A human merges.
 
 Several agents run at once, one worktree and branch each.
 
@@ -14,7 +14,7 @@ issue ──► claim ──► worktree ──► agent solves ──► push �
                                                             │
                           ┌─────────────────────────────────┘
                           ▼
-                    Greptile scores N/5 ──► 5/5? ──► agent:ready (human merges)
+                    Greptile scores N/5 ──► 5/5 + CI green? ──► agent:ready (human merges)
                           ▲                   │
                           └── agent revises ◄─┘   (up to max_iterations)
 ```
@@ -141,6 +141,11 @@ or post-dates the push, so a stale verdict is never mistaken for a fresh one. If
 arrives within `review_timeout_sec`, Looper comments `@greptileai review` to re-trigger,
 up to `max_retriggers` times.
 
+**Ready also means green.** After a 5/5, Looper waits for the PR's checks on that head
+(`statusCheckRollup`). A failing check is another revise round: the agent gets each failed
+check's name, link and, for GitHub Actions, the tail of the failed job's log. Checks still
+running after `ci_timeout_sec` park the task.
+
 **Giving up is a state, not a crash.** Iteration cap, per-issue budget, a silent reviewer, an
 agent that declines the issue (`HARNESS_ABORT:`) or produces no commits — each parks the task:
 the PR stays open, gets `agent:needs-human`, and a comment explains what happened. Nothing is
@@ -156,6 +161,7 @@ See `src/Looper/looper.toml.example` for every option. The ones worth knowing:
 | `loop.max_iterations` | 5 | review rounds before parking |
 | `loop.max_open_prs` | 5 | back-pressure on the repo |
 | `loop.skip_labels` | `no-agent, wontfix, blocked, question` | issues the daemon ignores |
+| `loop.ci_timeout_sec` | 1800 | how long a 5/5 PR waits for checks before parking |
 | `loop.only_labels` | `agent` | issues must carry one to be worked; `[]` = every open issue |
 | `agent.max_budget_usd` | 5.0 | ceiling per agent run |
 | `safety.max_cost_per_issue_usd` | 25.0 | ceiling per issue, across all rounds |

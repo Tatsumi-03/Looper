@@ -39,6 +39,17 @@ class FakeGH:
     def __init__(self):
         self.prs, self.comments, self.labels, self.calls = {}, [], [], []
         self._next_pr = 100
+        self.rollups = [[]]  # statusCheckRollup per gh.pr call, last one repeats; [] = green
+        self.job_logs = {}
+        self.mergeable = ["MERGEABLE"]  # same: one per gh.pr call, last repeats
+
+    def pr(self, n):
+        rollup = self.rollups.pop(0) if len(self.rollups) > 1 else self.rollups[0]
+        merge = self.mergeable.pop(0) if len(self.mergeable) > 1 else self.mergeable[0]
+        return {"number": n, "state": "OPEN", "statusCheckRollup": rollup, "mergeable": merge}
+
+    def failed_job_log(self, job_id):
+        return self.job_logs.get(job_id, "")
 
     def preflight(self):
         pass
@@ -288,3 +299,47 @@ def test_failed_run_over_stale_commits_parks_instead_of_pushing(tmp_path, origin
     assert task.state == State.PARKED
     assert "added nothing" in task.error
     assert gh.prs == {}, "no PR may be opened from another run's commits"
+
+
+RED_TESTS = {"__typename": "CheckRun", "name": "tests", "status": "COMPLETED",
+             "conclusion": "FAILURE",
+             "detailsUrl": "https://github.com/acme/widget/actions/runs/1/job/77"}
+
+
+def test_five_of_five_with_red_ci_gets_a_fix_round_before_ready(tmp_path, origin):
+    cfg, store, gh, wt = make(tmp_path, origin, scores=[5])
+    gh.rollups = [[RED_TESTS], []]
+    gh.job_logs["77"] = "tests\trun\tAssertionError: expected 2, got 3"
+    agent = FakeAgent()
+
+    task = asyncio.run(Orchestrator(cfg, store, gh, wt, agent).drive(42))
+
+    assert task.state == State.READY_FOR_HUMAN
+    assert task.iteration == 1, "the CI fix costs a round like a review does"
+    fix_prompt = agent.runs[1]["prompt"]
+    assert "CI checks are failing" in fix_prompt
+    assert "### tests — FAILURE" in fix_prompt and "expected 2, got 3" in fix_prompt
+
+
+def test_conflicting_pr_gets_a_merge_round_before_ready(tmp_path, origin):
+    cfg, store, gh, wt = make(tmp_path, origin, scores=[5])
+    gh.mergeable = ["CONFLICTING", "MERGEABLE"]
+    agent = FakeAgent()
+
+    task = asyncio.run(Orchestrator(cfg, store, gh, wt, agent).drive(42))
+
+    assert task.state == State.READY_FOR_HUMAN
+    assert task.iteration == 1
+    assert "git merge origin/main" in agent.runs[1]["prompt"]
+
+
+def test_ci_that_never_finishes_parks_instead_of_going_ready(tmp_path, origin):
+    cfg, store, gh, wt = make(tmp_path, origin, scores=[5])
+    cfg.loop.ci_timeout_sec = 0
+    gh.rollups = [[{"__typename": "CheckRun", "name": "tests", "status": "IN_PROGRESS",
+                    "conclusion": None}]]
+
+    task = asyncio.run(Orchestrator(cfg, store, gh, wt, FakeAgent()).drive(42))
+
+    assert task.state == State.PARKED and "CI still running" in task.error
+    assert (101, LABEL_READY) not in gh.labels

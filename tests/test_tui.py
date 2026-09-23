@@ -2,10 +2,26 @@ import asyncio
 import curses
 import threading
 import time
+from datetime import datetime, timezone
 
 from Looper.config import Config, RepoCfg
-from Looper.state import State, Store
-from Looper.tui import _start_daemon, act, navigate, scroll_log, visible_log
+from Looper.state import State, Store, Task
+from Looper.tui import _start_daemon, act, ago, navigate, scroll_log, summary, visible_log
+
+
+def test_ago_picks_largest_whole_unit():
+    now = datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
+    assert ago("2026-01-02T11:59:15+00:00", now) == "45s"
+    assert ago("2026-01-02T11:48:00+00:00", now) == "12m"
+    assert ago("2026-01-02T09:00:00+00:00", now) == "3h"
+    assert ago("2025-12-31T11:00:00+00:00", now) == "2d"
+    assert ago("", now) == "-"                           # task row without a timestamp
+
+
+def test_summary_counts_by_attention_group():
+    tasks = [Task(issue_number=n, state=s) for n, s in enumerate([
+        State.SOLVING, State.REVISING, State.AWAITING_REVIEW, State.PARKED, State.PENDING])]
+    assert summary(tasks) == "2 working · 1 review · 1 parked"   # PENDING and empty groups omitted
 
 
 def test_visible_log_shows_tail_by_default():

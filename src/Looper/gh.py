@@ -169,6 +169,14 @@ class GH:
         out = self.api(f"repos/{self.slug}/commits/{sha}/check-runs?per_page=100")
         return (out or {}).get("check_runs", [])
 
+    def failed_job_log(self, job_id: str) -> str:
+        """Log of the failed steps of one Actions job; '' if GitHub won't give it up."""
+        try:
+            return self._run(["run", "view", "--job", job_id, "--log-failed", "--repo", self.slug]) or ""
+        except GHError as exc:
+            log.debug("failed_job_log(%s): %s", job_id, exc)
+            return ""
+
     # --- misc ------------------------------------------------------------
     def default_branch(self) -> str:
         out = self._run(["repo", "view", self.slug, "--json", "defaultBranchRef"], parse_json=True)

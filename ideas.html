@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Looper Ideas</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --dim:#666; --line:#e5e5e5; --s:#16a34a; --m:#ca8a04; --l:#dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111; --fg:#eee; --dim:#999; --line:#2a2a2a; } }
+  body { background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; max-width:760px; margin:0 auto; padding:24px 16px; }
+  h1 { margin:0 } h2 { margin-top:2em; border-bottom:1px solid var(--line); padding-bottom:4px }
+  p.sub, li span { color:var(--dim) }
+  li { margin:.6em 0 } li b { display:block }
+  .s { color:var(--s) } .m { color:var(--m) } .l { color:var(--l) }
+</style>
+</head>
+<body>
+<h1>Looper — ideas</h1>
+<p class="sub">Grouped by size. <span class="s">small</span> = an afternoon, <span class="m">medium</span> = a day or two, <span class="l">large</span> = a real project.</p>
+
+<h2 class="s">Small</h2>
+<ol>
+  <li><b>Handle merge conflicts</b><span>We already fetch <code>mergeable</code>. If a PR is CONFLICTING, send the agent a "rebase onto main and fix conflicts" round instead of leaving it stuck.</span></li>
+  <li><b>Requeue from the TUI</b><span>One key to send a parked task back to the queue, so you don't have to touch the database or GitHub labels.</span></li>
+  <li><b>Priority labels</b><span>Pick up issues labelled <code>p0</code>/<code>p1</code> first instead of oldest-first.</span></li>
+  <li><b>Daily spend cap</b><span>There's a per-issue cap already. Add a total-per-day cap so a bad day can't burn the budget.</span></li>
+  <li><b>Notify when something needs you</b><span>Desktop notification (<code>notify-send</code>) or a webhook when a PR goes ready or parks.</span></li>
+</ol>
+
+<h2 class="m">Medium</h2>
+<ol start="6">
+  <li><b>Listen to human comments too</b><span>Right now only Greptile drives revisions. Feed comments from people on the PR into the next round.</span></li>
+  <li><b>Switch to a stronger model when stuck</b><span>Start on Sonnet; after two rounds with no score gain, retry on Opus.</span></li>
+  <li><b>Ask before guessing</b><span>If an issue is too vague, the agent posts a question on it and parks as <code>needs-info</code> instead of writing the wrong thing.</span></li>
+  <li><b>Plan first, code after 👍</b><span>Optional mode: agent posts a short plan on the issue and waits for approval before opening a PR.</span></li>
+  <li><b>Run tests before pushing</b><span>Have the agent run the repo's test command locally before each push, saving slow CI round-trips.</span></li>
+  <li><b>Clean up stale work</b><span>Close parked PRs and delete their branches and worktrees after N days.</span></li>
+  <li><b>Open a task's transcript in the TUI</b><span>Press a key to read what the agent actually did on the selected task.</span></li>
+</ol>
+
+<h2 class="l">Large</h2>
+<ol start="13">
+  <li><b>Stats page</b><span>Success rate, rounds to 5/5, cost per merged PR, over time. Tells you if Looper is worth it.</span></li>
+  <li><b>Respect issue dependencies</b><span>Don't start issue B while it says "blocked by #A" and A isn't merged.</span></li>
+  <li><b>Split big issues</b><span>Agent breaks a large issue into smaller sub-issues and works them one by one.</span></li>
+  <li><b>Several repos at once</b><span>One daemon watching a list of repos, with a repo column in the TUI.</span></li>
+</ol>
+</body>
+</html>

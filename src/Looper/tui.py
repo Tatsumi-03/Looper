@@ -17,6 +17,7 @@ import collections
 import curses
 import logging
 import threading
+from datetime import datetime, timezone
 
 from .config import Config
 from .orchestrator import Orchestrator
@@ -28,9 +29,19 @@ log = logging.getLogger("looper.tui")
 REFRESH_MS = 2000
 LOG_MAXLINES = 2000
 LOG_MIN_HEIGHT = 5
-HELP = ("[j/k] move  [a] start agent  [r] retry  [x] abandon  [c] clean worktree  "
-        "[d] daemon on/off  [PgUp/PgDn] scroll log  [q] quit")
-HEADER = f"{'ISSUE':>6}  {'STATE':<16} {'PR':>5}  {'IT':>2} {'SCORE':>5} {'BEST':>4} {'COST':>7}  TITLE"
+HELP = "j/k move  a start  r retry  x abandon  c clean  d daemon  PgUp/PgDn log  q quit"
+HEADER = (f"{'ISSUE':>6}  {'STATE':<16} {'PR':>5}  {'IT':>2} {'SCORE':>5} {'BEST':>4} "
+          f"{'COST':>7} {'AGO':>4}  TITLE")
+
+# what a glance at the table should tell you: who needs a human, who is busy
+GROUPS = {
+    "working": {State.CLAIMED, State.WORKTREE, State.SOLVING, State.REVISING},
+    "review": {State.PUSHED, State.PR_OPEN, State.AWAITING_REVIEW, State.SCORED},
+    "ready": {State.READY_FOR_HUMAN},
+    "parked": {State.PARKED},
+}
+COLORS = {"working": curses.COLOR_CYAN, "review": curses.COLOR_YELLOW,
+          "ready": curses.COLOR_GREEN, "parked": curses.COLOR_RED}
 
 
 class _BufferHandler(logging.Handler):
@@ -94,6 +105,45 @@ def visible_log(lines: list[str], height: int, scroll: int) -> list[str]:
     return lines[start:end]
 
 
+def group(state: str) -> str | None:
+    return next((g for g, states in GROUPS.items() if state in states), None)
+
+
+def summary(tasks: list[Task]) -> str:
+    """'2 working · 1 ready' — empty groups left out."""
+    counts = collections.Counter(group(t.state) for t in tasks)
+    return " · ".join(f"{counts[g]} {g}" for g in GROUPS if counts[g])
+
+
+def ago(ts: str, now: datetime | None = None) -> str:
+    """ISO timestamp -> '45s' / '12m' / '3h' / '2d'."""
+    try:
+        secs = int(((now or datetime.now(timezone.utc)) - datetime.fromisoformat(ts))
+                   .total_seconds())
+    except ValueError:
+        return "-"
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{secs // size}{unit}"
+    return f"{max(0, secs)}s"
+
+
+def _attr(name: str | None) -> int:
+    """Colour pair for a group or log level; plain on terminals without colour."""
+    if name is None or not curses.has_colors():
+        return 0
+    return curses.color_pair(list(COLORS).index(name) + 1)
+
+
+def _init_colors() -> None:
+    if not curses.has_colors():
+        return
+    curses.start_color()
+    curses.use_default_colors()
+    for i, color in enumerate(COLORS.values(), start=1):
+        curses.init_pair(i, color, -1)
+
+
 def act(key: int, task: Task, store: Store, cfg: Config,
         orch: Orchestrator | None, loop: asyncio.AbstractEventLoop | None) -> str:
     """Apply a/r/x/c to one task. a/r resume the daemon's own spawn machinery
@@ -124,9 +174,14 @@ def act(key: int, task: Task, store: Store, cfg: Config,
 def _row(t: Task, width: int) -> str:
     score = f"{t.last_score}/5" if t.last_score is not None else "-"
     best = str(t.best_score) if t.best_score is not None else "-"
-    title = t.title[: max(0, width - 55)]
+    title = t.title[: max(0, width - 60)]
     return (f"{t.issue_number:>6}  {t.state:<16} {t.pr_number or '-':>5}  {t.iteration:>2} "
-            f"{score:>5} {best:>4} {'$%.2f' % t.cost_usd:>7}  {title}")
+            f"{score:>5} {best:>4} {'$%.2f' % t.cost_usd:>7} {ago(t.updated_at):>4}  {title}")
+
+
+def _detail(t: Task) -> str:
+    line = f"#{t.issue_number} {t.state} {ago(t.updated_at)} ago"
+    return f"{line} — {t.error}" if t.error else line
 
 
 def _draw(win, cfg: Config, tasks: list[Task], selected: int, status: str,
@@ -134,25 +189,29 @@ def _draw(win, cfg: Config, tasks: list[Task], selected: int, status: str,
     win.erase()
     h, w = win.getmaxyx()
     log_h = max(LOG_MIN_HEIGHT, h // 3)
-    table_bottom = max(4, h - log_h - 2)  # -2: divider + log title row
+    table_bottom = max(3, h - log_h - 3)  # -3: detail line, log divider, footer
 
-    daemon_label = "on" if daemon_on else "OFF"
-    win.addnstr(0, 0, f"looper — {cfg.repo.slug}  ({len(tasks)} tasks)  daemon:{daemon_label}",
-                w - 1, curses.A_BOLD)
-    win.addnstr(1, 0, HELP, w - 1)
-    win.addnstr(2, 0, status, w - 1)
-    win.addnstr(3, 0, HEADER, w - 1, curses.A_UNDERLINE)
+    daemon = "● on" if daemon_on else "○ OFF"
+    bar = f" looper  {cfg.repo.slug}   daemon {daemon}   {summary(tasks)}"
+    win.addnstr(0, 0, bar.ljust(w - 1), w - 1, curses.A_REVERSE | curses.A_BOLD)
+    win.addnstr(1, 0, HEADER, w - 1, curses.A_UNDERLINE)
+    if not tasks:
+        win.addnstr(2, 2, 'no tasks — label an issue "agent" to queue it', w - 3, curses.A_DIM)
     for i, t in enumerate(tasks):
-        if 4 + i >= table_bottom:
+        if 2 + i >= table_bottom:
             break
-        win.addnstr(4 + i, 0, _row(t, w), w - 1, curses.A_REVERSE if i == selected else 0)
+        attr = _attr(group(t.state)) | (curses.A_REVERSE if i == selected else 0)
+        win.addnstr(2 + i, 0, _row(t, w).ljust(w - 1), w - 1, attr)
 
-    win.addnstr(table_bottom, 0, "-" * (w - 1), w - 1)
-    following = " (live)" if log_scroll == 0 else f" (scrolled back {log_scroll})"
-    win.addnstr(table_bottom + 1, 0, f"daemon log{following}", w - 1, curses.A_BOLD)
-    log_area_h = h - (table_bottom + 2)
-    for i, line in enumerate(visible_log(log_lines, log_area_h, log_scroll)):
-        win.addnstr(table_bottom + 2 + i, 0, line, w - 1)
+    if status or tasks:
+        win.addnstr(table_bottom, 0, status or _detail(tasks[selected]), w - 1, curses.A_BOLD)
+    following = "live" if log_scroll == 0 else f"scrolled back {log_scroll}"
+    win.addnstr(table_bottom + 1, 0, f"── log ({following}) ".ljust(w - 1, "─"), w - 1, curses.A_DIM)
+    log_top = table_bottom + 2
+    for i, line in enumerate(visible_log(log_lines, h - 1 - log_top, log_scroll)):
+        level = "parked" if " ERROR " in line else "review" if " WARNING " in line else None
+        win.addnstr(log_top + i, 0, line, w - 1, _attr(level))
+    win.addnstr(h - 1, 0, HELP, w - 1, curses.A_DIM)
     win.refresh()
 
 
@@ -160,6 +219,7 @@ def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
           loop: asyncio.AbstractEventLoop, log_buf: collections.deque[str],
           daemon_thread: threading.Thread) -> threading.Thread:
     curses.curs_set(0)
+    _init_colors()
     win.timeout(REFRESH_MS)
     selected = 0
     log_scroll = 0

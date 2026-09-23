@@ -31,6 +31,7 @@ max_iterations = 5            # review rounds before parking the task
 max_open_prs = 5
 issue_poll_sec = 60
 skip_labels = ["no-agent", "wontfix", "blocked", "question"]
+ci_timeout_sec = 1800         # a 5/5 PR must also pass CI; park if checks run longer than this
 only_labels = ["agent"]       # work only issues carrying one of these; [] = every open issue
 
 [greptile]
