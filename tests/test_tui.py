@@ -1,8 +1,11 @@
+import asyncio
 import curses
+import threading
+import time
 
 from Looper.config import Config, RepoCfg
 from Looper.state import State, Store
-from Looper.tui import act, navigate, scroll_log, visible_log
+from Looper.tui import _start_daemon, act, navigate, scroll_log, visible_log
 
 
 def test_visible_log_shows_tail_by_default():
@@ -84,3 +87,36 @@ def test_act_clean_refuses_active_task(tmp_path):
     msg = act(ord("c"), store.get(2), store, cfg, None, None)
     assert "not cleaned" in msg
     store.close()
+
+
+class _FakeOrch:
+    """Stands in for Orchestrator — just enough for _start_daemon's contract."""
+
+    def __init__(self):
+        self.shutdown = asyncio.Event()
+        self.runs = 0
+
+    async def run_daemon(self, *, install_signals=True):
+        self.runs += 1
+        await self.shutdown.wait()
+
+
+def test_daemon_thread_toggles_off_and_on():
+    loop = asyncio.new_event_loop()
+    orch = _FakeOrch()
+    thread = _start_daemon(loop, orch)
+    time.sleep(0.05)
+    assert thread.is_alive()
+
+    loop.call_soon_threadsafe(orch.shutdown.set)
+    thread.join(timeout=2)
+    assert not thread.is_alive()  # 'd' toggles off
+
+    thread = _start_daemon(loop, orch)  # 'd' toggles back on — same loop, fresh thread
+    time.sleep(0.05)
+    assert thread.is_alive()
+    assert orch.runs == 2
+
+    loop.call_soon_threadsafe(orch.shutdown.set)
+    thread.join(timeout=2)
+    loop.close()

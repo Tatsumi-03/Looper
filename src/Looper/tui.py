@@ -3,6 +3,7 @@
 Embeds the daemon loop in a background thread so `looper tui` alone drives
 agents — no separate `looper daemon` process needed. Store is safe to share:
 it already uses check_same_thread=False plus an RLock (see state.py).
+Press `d` to stop or restart that thread without leaving the TUI.
 
 The daemon's `logging` output would otherwise land on stdout and corrupt the
 curses screen, so it's captured into an in-memory ring buffer instead and
@@ -28,7 +29,7 @@ REFRESH_MS = 2000
 LOG_MAXLINES = 2000
 LOG_MIN_HEIGHT = 5
 HELP = ("[j/k] move  [a] start agent  [r] retry  [x] abandon  [c] clean worktree  "
-        "[PgUp/PgDn] scroll log  [q] quit")
+        "[d] daemon on/off  [PgUp/PgDn] scroll log  [q] quit")
 HEADER = f"{'ISSUE':>6}  {'STATE':<16} {'PR':>5}  {'IT':>2} {'SCORE':>5} {'BEST':>4} {'COST':>7}  TITLE"
 
 
@@ -129,13 +130,15 @@ def _row(t: Task, width: int) -> str:
 
 
 def _draw(win, cfg: Config, tasks: list[Task], selected: int, status: str,
-          log_lines: list[str], log_scroll: int) -> None:
+          log_lines: list[str], log_scroll: int, daemon_on: bool) -> None:
     win.erase()
     h, w = win.getmaxyx()
     log_h = max(LOG_MIN_HEIGHT, h // 3)
     table_bottom = max(4, h - log_h - 2)  # -2: divider + log title row
 
-    win.addnstr(0, 0, f"looper — {cfg.repo.slug}  ({len(tasks)} tasks)", w - 1, curses.A_BOLD)
+    daemon_label = "on" if daemon_on else "OFF"
+    win.addnstr(0, 0, f"looper — {cfg.repo.slug}  ({len(tasks)} tasks)  daemon:{daemon_label}",
+                w - 1, curses.A_BOLD)
     win.addnstr(1, 0, HELP, w - 1)
     win.addnstr(2, 0, status, w - 1)
     win.addnstr(3, 0, HEADER, w - 1, curses.A_UNDERLINE)
@@ -154,7 +157,8 @@ def _draw(win, cfg: Config, tasks: list[Task], selected: int, status: str,
 
 
 def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
-          loop: asyncio.AbstractEventLoop, log_buf: collections.deque[str]) -> None:
+          loop: asyncio.AbstractEventLoop, log_buf: collections.deque[str],
+          daemon_thread: threading.Thread) -> threading.Thread:
     curses.curs_set(0)
     win.timeout(REFRESH_MS)
     selected = 0
@@ -169,16 +173,23 @@ def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
         h, _w = win.getmaxyx()
         log_h = max(LOG_MIN_HEIGHT, h // 3)
         log_scroll = scroll_log(-1, len(lines), log_h, log_scroll)  # reclamp as lines arrive
-        _draw(win, cfg, tasks, selected, status, lines, log_scroll)
+        _draw(win, cfg, tasks, selected, status, lines, log_scroll, daemon_thread.is_alive())
         status = ""
 
         key = win.getch()
         if key in (ord("q"), 27):
-            return
+            return daemon_thread
         if key in (curses.KEY_UP, curses.KEY_DOWN, ord("j"), ord("k")):
             selected = navigate(key, len(tasks), selected)
         elif key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
             log_scroll = scroll_log(key, len(lines), log_h, log_scroll)
+        elif key == ord("d"):
+            if daemon_thread.is_alive():
+                loop.call_soon_threadsafe(orch.shutdown.set)
+                status = "daemon: stopping"
+            else:
+                daemon_thread = _start_daemon(loop, orch)
+                status = "daemon: starting"
         elif key in (ord("a"), ord("r"), ord("x"), ord("c")) and tasks:
             status = act(key, tasks[selected], store, cfg, orch, loop)
 
@@ -189,8 +200,14 @@ def _run_daemon_thread(loop: asyncio.AbstractEventLoop, orch: Orchestrator) -> N
         loop.run_until_complete(orch.run_daemon(install_signals=False))
     except Exception:
         log.exception("embedded daemon loop crashed")
-    finally:
-        loop.close()
+
+
+def _start_daemon(loop: asyncio.AbstractEventLoop, orch: Orchestrator) -> threading.Thread:
+    """(Re)start the embedded daemon. Reuses `loop` — it's only closed when the TUI exits."""
+    orch.shutdown.clear()
+    thread = threading.Thread(target=_run_daemon_thread, args=(loop, orch), daemon=True)
+    thread.start()
+    return thread
 
 
 def run(cfg: Config) -> int:
@@ -198,12 +215,12 @@ def run(cfg: Config) -> int:
     log_buf = _capture_logs()
     store, _gh, _wt, orch = build(cfg)
     loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=_run_daemon_thread, args=(loop, orch), daemon=True)
-    thread.start()
+    thread = _start_daemon(loop, orch)
     try:
-        curses.wrapper(_loop, cfg, store, orch, loop, log_buf)
+        thread = curses.wrapper(_loop, cfg, store, orch, loop, log_buf, thread)
     finally:
         loop.call_soon_threadsafe(orch.shutdown.set)
         thread.join(timeout=15)
+        loop.close()
         store.close()
     return 0
