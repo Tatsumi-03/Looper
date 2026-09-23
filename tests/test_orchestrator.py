@@ -87,3 +87,19 @@ def test_trackable_issues_only_labels_opts_in_and_skip_still_wins(tmp_path):
 
     assert [i["number"] for i in trackable_issues(gh, cfg, store)] == [2]
     store.close()
+
+
+def test_trackable_issues_orders_by_priority_then_oldest(tmp_path):
+    store = Store(tmp_path / "looper.db")
+    cfg = Config(repo=RepoCfg(slug="o/n"), loop=LoopCfg(only_labels=[]), root=tmp_path)
+    gh = FakeGH(issues=[  # gh lists newest first
+        {"number": 6, "title": "unprioritised", "labels": [{"name": "bug"}]},
+        {"number": 5, "title": "p2", "labels": [{"name": "p2"}]},
+        {"number": 4, "title": "p0 and p2", "labels": [{"name": "P2"}, {"name": "P0"}]},
+        {"number": 3, "title": "p1", "labels": [{"name": "p1"}]},
+        {"number": 2, "title": "unlabelled", "labels": []},
+        {"number": 1, "title": "older p1", "labels": [{"name": "p1"}]},
+    ])
+
+    assert [i["number"] for i in trackable_issues(gh, cfg, store)] == [4, 1, 3, 5, 2, 6]
+    store.close()
