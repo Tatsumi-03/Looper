@@ -3,7 +3,8 @@
 Embeds the daemon loop in a background thread so `looper tui` alone drives
 agents — no separate `looper daemon` process needed. Store is safe to share:
 it already uses check_same_thread=False plus an RLock (see state.py).
-Press `d` to stop or restart that thread without leaving the TUI.
+Press `D` to stop or restart that thread without leaving the TUI, and `d` to
+page through the selected task's agent transcripts.
 
 The daemon's `logging` output would otherwise land on stdout and corrupt the
 curses screen, so it's captured into an in-memory ring buffer instead and
@@ -15,10 +16,16 @@ from __future__ import annotations
 import asyncio
 import collections
 import curses
+import json
 import logging
+import os
+import shlex
+import subprocess
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
+from .agent import tool_summary
 from .config import Config
 from .gh import GHError
 from .orchestrator import LABEL_NEEDS_HUMAN, Orchestrator
@@ -30,7 +37,8 @@ log = logging.getLogger("looper.tui")
 REFRESH_MS = 2000
 LOG_MAXLINES = 2000
 LOG_MIN_HEIGHT = 5
-HELP = "j/k move  a start  r retry  e requeue  x abandon  c clean  d daemon  PgUp/PgDn log  q quit"
+HELP = ("j/k move  a start  r retry  e requeue  x abandon  c clean  d transcript  D daemon  "
+        "PgUp/PgDn log  q quit")
 HEADER = (f"{'ISSUE':>6}  {'STATE':<16} {'PR':>5}  {'IT':>2} {'SCORE':>5} {'BEST':>4} "
           f"{'COST':>7} {'AGO':>4}  TITLE")
 
@@ -186,6 +194,57 @@ def act(key: int, task: Task, store: Store, cfg: Config,
     return ""
 
 
+def _run_order(path: Path) -> tuple[int, str]:
+    """'100-revise-100' after '99-revise-99': the iteration prefix grows past 2 digits."""
+    iteration, _, kind = path.stem.partition("-")
+    return (int(iteration) if iteration.isdigit() else -1, kind)
+
+
+def transcript(log_dir: Path) -> str:
+    """Every stream-json run in `log_dir`, oldest first, as readable text:
+    what the agent said, which tools it called, how each run ended."""
+    out: list[str] = []
+    for path in sorted(log_dir.glob("*.jsonl"), key=_run_order):
+        out.append(f"══ {path.stem} ".ljust(72, "═"))
+        for raw in path.read_text(errors="replace").splitlines():
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") == "assistant":
+                for block in msg.get("message", {}).get("content", []):
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text":
+                        out.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        out.append(f"→ {tool_summary(block)}")
+            elif msg.get("type") == "result":
+                out.append(f"── {msg.get('subtype')}: {msg.get('num_turns', 0)} turns, "
+                           f"${msg.get('total_cost_usd') or 0.0:.2f}")
+                if msg.get("result"):
+                    out.append(msg["result"])
+            elif msg.get("dry_run"):
+                out.append("[dry-run] no agent ran")
+        out.append("")
+    return "\n".join(out)
+
+
+def _page(win, text: str) -> str:
+    """Hand the screen to $PAGER (default less) and take it back when it quits."""
+    pager = os.environ.get("PAGER", "").strip() or "less"
+    curses.endwin()
+    try:
+        done = subprocess.run(shlex.split(pager), input=text.encode(), check=False)
+    except (OSError, ValueError) as exc:  # missing binary / unbalanced quotes in $PAGER
+        return f"pager {pager!r} failed: {exc}"
+    finally:
+        win.refresh()
+    return f"pager {pager!r} exited {done.returncode}" if done.returncode else ""
+
+
 def _row(t: Task, width: int) -> str:
     score = f"{t.last_score}/5" if t.last_score is not None else "-"
     best = str(t.best_score) if t.best_score is not None else "-"
@@ -258,7 +317,11 @@ def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
             selected = navigate(key, len(tasks), selected)
         elif key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
             log_scroll = scroll_log(key, len(lines), log_h, log_scroll)
-        elif key == ord("d"):
+        elif key == ord("d") and tasks:
+            issue = tasks[selected].issue_number
+            text = transcript(cfg.logs_dir / f"issue-{issue}")
+            status = _page(win, text) if text else f"#{issue} no transcript yet"
+        elif key == ord("D"):
             if daemon_thread.is_alive():
                 loop.call_soon_threadsafe(orch.shutdown.set)
                 status = "daemon: stopping"

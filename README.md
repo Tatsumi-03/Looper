@@ -216,6 +216,8 @@ watching one. The task table is on top, a scrollable daemon log below it.
 | `e` | requeue a parked task and drop its `agent:needs-human` label |
 | `x` | park a task by hand |
 | `c` | delete a finished task's worktree |
+| `d` | read the selected task's agent transcripts in `$PAGER` (default `less`) |
+| `D` | stop / restart the embedded daemon |
 | `PgUp` / `PgDn` | scroll the log; `PgDn` back to the bottom resumes following |
 | `q` | quit |
 

@@ -1,5 +1,6 @@
 import asyncio
 import curses
+import json
 import threading
 import time
 from datetime import datetime, timezone
@@ -7,7 +8,8 @@ from datetime import datetime, timezone
 from Looper.config import Config, RepoCfg
 from Looper.gh import GHError
 from Looper.state import State, Store, Task
-from Looper.tui import _start_daemon, act, ago, navigate, scroll_log, summary, visible_log
+from Looper.tui import (_start_daemon, act, ago, navigate, scroll_log, summary, transcript,
+                        visible_log)
 
 
 def test_ago_picks_largest_whole_unit():
@@ -176,9 +178,9 @@ def test_daemon_thread_toggles_off_and_on():
 
     loop.call_soon_threadsafe(orch.shutdown.set)
     thread.join(timeout=2)
-    assert not thread.is_alive()  # 'd' toggles off
+    assert not thread.is_alive()  # 'D' toggles off
 
-    thread = _start_daemon(loop, orch)  # 'd' toggles back on — same loop, fresh thread
+    thread = _start_daemon(loop, orch)  # 'D' toggles back on — same loop, fresh thread
     time.sleep(0.05)
     assert thread.is_alive()
     assert orch.runs == 2
@@ -186,3 +188,33 @@ def test_daemon_thread_toggles_off_and_on():
     loop.call_soon_threadsafe(orch.shutdown.set)
     thread.join(timeout=2)
     loop.close()
+
+
+def test_transcript_renders_runs_in_order(tmp_path):
+    def run(name, *msgs):
+        (tmp_path / name).write_text("\n".join(json.dumps(m) for m in msgs) + "\nnot json\n")
+
+    run("100-revise-100.jsonl", {"type": "result", "subtype": "error_max_turns"})
+    run("01-revise.jsonl", {"type": "result", "subtype": "success", "num_turns": 2,
+                            "total_cost_usd": 0.5, "result": "fixed review"})
+    run("00-solve.jsonl",
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "reading the code"},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "clean"}]}})
+    (tmp_path / "00-solve.prompt.md").write_text("not a transcript")
+
+    assert transcript(tmp_path).splitlines() == [
+        "══ 00-solve ".ljust(72, "═"),
+        "reading the code",
+        "→ Bash git status",       # tool calls shown; tool output and init noise skipped
+        "",
+        "══ 01-revise ".ljust(72, "═"),
+        "── success: 2 turns, $0.50",
+        "fixed review",
+        "",
+        "══ 100-revise-100 ".ljust(72, "═"),   # numeric order: a plain sort puts it first
+        "── error_max_turns: 0 turns, $0.00",
+    ]
+    assert transcript(tmp_path / "missing") == ""   # task that never ran an agent
