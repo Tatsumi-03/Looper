@@ -144,6 +144,7 @@ def test_transcript_renders_runs_in_order(tmp_path):
     def run(name, *msgs):
         (tmp_path / name).write_text("\n".join(json.dumps(m) for m in msgs) + "\nnot json\n")
 
+    run("100-revise-100.jsonl", {"type": "result", "subtype": "error_max_turns"})
     run("01-revise.jsonl", {"type": "result", "subtype": "success", "num_turns": 2,
                             "total_cost_usd": 0.5, "result": "fixed review"})
     run("00-solve.jsonl",
@@ -162,5 +163,8 @@ def test_transcript_renders_runs_in_order(tmp_path):
         "══ 01-revise ".ljust(72, "═"),
         "── success: 2 turns, $0.50",
         "fixed review",
+        "",
+        "══ 100-revise-100 ".ljust(72, "═"),   # numeric order: a plain sort puts it first
+        "── error_max_turns: 0 turns, $0.00",
     ]
     assert transcript(tmp_path / "missing") == ""   # task that never ran an agent

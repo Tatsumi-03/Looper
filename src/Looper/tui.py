@@ -179,11 +179,17 @@ def act(key: int, task: Task, store: Store, cfg: Config,
     return ""
 
 
+def _run_order(path: Path) -> tuple[int, str]:
+    """'100-revise-100' after '99-revise-99': the iteration prefix grows past 2 digits."""
+    iteration, _, kind = path.stem.partition("-")
+    return (int(iteration) if iteration.isdigit() else -1, kind)
+
+
 def transcript(log_dir: Path) -> str:
     """Every stream-json run in `log_dir`, oldest first, as readable text:
     what the agent said, which tools it called, how each run ended."""
     out: list[str] = []
-    for path in sorted(log_dir.glob("*.jsonl")):
+    for path in sorted(log_dir.glob("*.jsonl"), key=_run_order):
         out.append(f"══ {path.stem} ".ljust(72, "═"))
         for raw in path.read_text(errors="replace").splitlines():
             try:
@@ -213,15 +219,15 @@ def transcript(log_dir: Path) -> str:
 
 def _page(win, text: str) -> str:
     """Hand the screen to $PAGER (default less) and take it back when it quits."""
-    pager = os.environ.get("PAGER") or "less"
+    pager = os.environ.get("PAGER", "").strip() or "less"
     curses.endwin()
     try:
-        subprocess.run(shlex.split(pager), input=text.encode(), check=False)
+        done = subprocess.run(shlex.split(pager), input=text.encode(), check=False)
     except (OSError, ValueError) as exc:  # missing binary / unbalanced quotes in $PAGER
         return f"pager {pager!r} failed: {exc}"
     finally:
         win.refresh()
-    return ""
+    return f"pager {pager!r} exited {done.returncode}" if done.returncode else ""
 
 
 def _row(t: Task, width: int) -> str:

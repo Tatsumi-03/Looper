@@ -86,7 +86,8 @@ class ClaudeAgent:
         started = time.monotonic()
 
         if self.dry_run:
-            log_path.write_text(json.dumps({"dry_run": True, "argv": argv, "prompt": prompt}) + "\n")
+            with log_path.open("a") as sink:
+                sink.write(json.dumps({"dry_run": True, "argv": argv, "prompt": prompt}) + "\n")
             log.info("[dry-run] would run: %s (cwd=%s)", " ".join(argv[:8]) + " …", cwd)
             return RunResult(True, session_id, 0.0, 0, "[dry-run]", "dry_run", None, log_path, 0.0)
 
@@ -104,7 +105,7 @@ class ClaudeAgent:
         stderr_tail: list[str] = []
 
         async def pump_stdout(fh) -> None:
-            with log_path.open("w") as sink:
+            with log_path.open("a") as sink:  # a retried attempt adds to its transcript
                 async for raw in fh:
                     line = raw.decode("utf-8", "replace")
                     sink.write(line)
