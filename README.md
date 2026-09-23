@@ -156,6 +156,7 @@ See `src/Looper/looper.toml.example` for every option. The ones worth knowing:
 | `loop.max_iterations` | 5 | review rounds before parking |
 | `loop.max_open_prs` | 5 | back-pressure on the repo |
 | `loop.skip_labels` | `no-agent, wontfix, blocked, question` | issues the daemon ignores |
+| `loop.only_labels` | `agent` | issues must carry one to be worked; `[]` = every open issue |
 | `agent.max_budget_usd` | 5.0 | ceiling per agent run |
 | `safety.max_cost_per_issue_usd` | 25.0 | ceiling per issue, across all rounds |
 | `greptile.target_score` | 5 | lower it to 4 if 5/5 proves unreachable |

@@ -41,6 +41,7 @@ class LoopCfg:
     max_open_prs: int = 5
     issue_poll_sec: int = 60
     skip_labels: list[str] = field(default_factory=lambda: ["no-agent", "wontfix", "blocked"])
+    only_labels: list[str] = field(default_factory=lambda: ["agent"])  # empty = every open issue
 
 
 @dataclass

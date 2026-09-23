@@ -1,8 +1,8 @@
 # Looper
 
-Looper is  a minimal (bare-bones for now ) Tui which runs on a server or your personal device
+Looper is  a minimal Tui which runs on a server or your personal device
 
-you can think of Looper as a basic loop-engineering tui which helps the user makes loops easily
+you can think of Looper as a easy to use loop-engineering tui which helps the user makes loops easily
 
 ## What makes Looper special
 
@@ -14,6 +14,10 @@ currently Looper only available on the cli and has no GUI interface
 I like ambitious ideas, simple systems, and software that feels obvious. Do not preserve complexity just because it already exists. Do not introduce machinery because it looks architecturally impressive. Understand the real constraint, then fight for the smallest model that makes the correct behavior unsurprising.
 
 Channel both "measure twice, cut once" , "yagni" and "you only write once" principles. Fight scope creep. Try to honor the dev's intent in both a minimal and realistic fashion.
+
+And please for the love of god NO TATUTOLOGICAL Tests please have mercy on this soul.
+
+give a short answer to any small questions i ask you,answer in yes or no witha short sentence on why yes or no was given. 
 
 The rest of this document is meant to help you navigate the codebase and make changes effectively. Think of these instructions less as "hard rules", more as "good defaults". The developer's preferences should be able to override anything here.
 

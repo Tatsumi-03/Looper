@@ -41,7 +41,8 @@ def render(template: str, **vars: Any) -> str:
 
 
 def trackable_issues(gh: GH, cfg: Config, store: Store) -> list[dict[str, Any]]:
-    """Open issues not skip-labelled and not already claimed by another runner.
+    """Open issues opted in (if `only_labels` is set), not skip-labelled, and not
+    already claimed by another runner.
 
     Shared by the daemon's poll loop and the TUI's own issue discovery, so both
     apply the same skip-label / in-progress rules instead of drifting apart.
@@ -50,6 +51,9 @@ def trackable_issues(gh: GH, cfg: Config, store: Store) -> list[dict[str, Any]]:
     for issue in gh.list_open_issues():
         labels = {l["name"].lower() for l in issue.get("labels", [])}
         if labels & {s.lower() for s in cfg.loop.skip_labels}:
+            continue
+        only = {s.lower() for s in cfg.loop.only_labels}
+        if only and not labels & only:
             continue
         if LABEL_IN_PROGRESS in labels and store.get(issue["number"]) is None:
             log.info("#%s already labelled %s by another runner — skipping",
