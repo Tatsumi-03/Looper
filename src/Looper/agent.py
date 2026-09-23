@@ -21,6 +21,13 @@ def _mmss(seconds: float) -> str:
     return f"{int(seconds) // 60}m{int(seconds) % 60:02d}s"
 
 
+def tool_summary(block: dict) -> str:
+    """'Bash git status' — a tool_use block as one short line."""
+    args = block.get("input") or {}
+    target = args.get("file_path") or args.get("command") or ""
+    return f"{block.get('name', 'tool')} {str(target)[:60]}".strip()
+
+
 @dataclass
 class RunResult:
     ok: bool
@@ -180,10 +187,7 @@ class ClaudeAgent:
             state["turns"] = int(state.get("turns") or 0) + 1
             for block in msg.get("message", {}).get("content", []):
                 if isinstance(block, dict) and block.get("type") == "tool_use":
-                    name = block.get("name", "tool")
-                    target = (block.get("input") or {}).get("file_path") or \
-                             (block.get("input") or {}).get("command") or ""
-                    state["activity"] = f"{name} {str(target)[:60]}".strip()
+                    state["activity"] = tool_summary(block)
         if msg.get("type") == "result":
             state["subtype"] = msg.get("subtype")
             state["is_error"] = msg.get("is_error", False)

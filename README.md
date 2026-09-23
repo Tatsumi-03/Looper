@@ -215,6 +215,8 @@ watching one. The task table is on top, a scrollable daemon log below it.
 | `r` | reset a task's state and let the next poll cycle pick it up |
 | `x` | park a task by hand |
 | `c` | delete a finished task's worktree |
+| `d` | read the selected task's agent transcripts in `$PAGER` (default `less`) |
+| `D` | stop / restart the embedded daemon |
 | `PgUp` / `PgDn` | scroll the log; `PgDn` back to the bottom resumes following |
 | `q` | quit |
 
