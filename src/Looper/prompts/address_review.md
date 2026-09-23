@@ -1,6 +1,4 @@
-The pull request you opened for issue #{{ISSUE_NUMBER}} has been reviewed by
-Greptile, an AI code reviewer. It scored **{{SCORE}}/5** — we need **{{TARGET_SCORE}}/5**
-before a human will merge it.
+{{HEADLINE}}
 
 Repository: {{REPO}}
 Worktree:   {{WORKTREE}}

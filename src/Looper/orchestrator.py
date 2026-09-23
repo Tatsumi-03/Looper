@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import greptile
+from . import ci, greptile
 from .agent import ClaudeAgent, RunResult
 from .config import Config
 from .gh import GH, GHError
@@ -24,6 +24,7 @@ PROMPTS = Path(__file__).parent / "prompts"
 LABEL_IN_PROGRESS = "agent:in-progress"
 LABEL_READY = "agent:ready"
 LABEL_NEEDS_HUMAN = "agent:needs-human"
+PRIORITY_LABELS = ("p0", "p1", "p2")  # highest first; unlabelled issues rank last
 ABORT_TOKEN = "HARNESS_ABORT:"
 MARKER = "<!-- looper -->"
 PR_BODY_RE = re.compile(r"<pr-description>(.*?)</pr-description>", re.S | re.I)
@@ -41,21 +42,31 @@ def render(template: str, **vars: Any) -> str:
 
 
 def trackable_issues(gh: GH, cfg: Config, store: Store) -> list[dict[str, Any]]:
-    """Open issues not skip-labelled and not already claimed by another runner.
+    """Open issues opted in (if `only_labels` is set), not skip-labelled, and not
+    already claimed by another runner — ordered p0, p1, p2, then unlabelled,
+    oldest first within each.
 
     Shared by the daemon's poll loop and the TUI's own issue discovery, so both
     apply the same skip-label / in-progress rules instead of drifting apart.
     """
     out = []
+    rank: dict[int, int] = {}
     for issue in gh.list_open_issues():
         labels = {l["name"].lower() for l in issue.get("labels", [])}
         if labels & {s.lower() for s in cfg.loop.skip_labels}:
+            continue
+        only = {s.lower() for s in cfg.loop.only_labels}
+        if only and not labels & only:
             continue
         if LABEL_IN_PROGRESS in labels and store.get(issue["number"]) is None:
             log.info("#%s already labelled %s by another runner — skipping",
                      issue["number"], LABEL_IN_PROGRESS)
             continue
+        rank[issue["number"]] = min(
+            (PRIORITY_LABELS.index(l) for l in labels if l in PRIORITY_LABELS),
+            default=len(PRIORITY_LABELS))
         out.append(issue)
+    out.sort(key=lambda i: (rank[i["number"]], i["number"]))
     return out
 
 
@@ -375,7 +386,34 @@ class Orchestrator:
             self._write_review_log(task, review)
 
             if review.score >= cfg.greptile.target_score:
-                return self._succeed(task, review)
+                view = await self._wait_for_ci(task)
+                _, failing = ci.verdict(view.get("statusCheckRollup") or [])
+                if view.get("mergeable") == "CONFLICTING":
+                    why = "merge conflict"
+                    base = cfg.repo.base_branch
+                    headline = (f"Greptile scored the pull request you opened for issue "
+                                f"#{task.issue_number} **{review.score}/5**, but it now conflicts "
+                                f"with `{base}` and cannot be merged.")
+                    feedback = (f"## Merge conflict with {base}\n\n"
+                                f"`origin/{base}` has just been fetched. Run `git merge origin/{base}`, "
+                                f"resolve every conflict keeping the intent of both sides, run the "
+                                f"tests, and commit the merge. Do not rebase — Looper can't force-push.")
+                    await asyncio.to_thread(self.wt.fetch)
+                elif not failing:
+                    return self._succeed(task, review)
+                else:
+                    why = "CI failing"
+                    headline = (f"Greptile scored the pull request you opened for issue "
+                                f"#{task.issue_number} **{review.score}/5**, but its CI checks are "
+                                f"failing. A human will not merge a red PR — make CI pass.")
+                    feedback = await asyncio.to_thread(ci.render, self.gh, failing, task.head_sha)
+            else:
+                why = f"{review.score}/5"
+                headline = (f"The pull request you opened for issue #{task.issue_number} has been "
+                            f"reviewed by Greptile, an AI code reviewer. It scored "
+                            f"**{review.score}/5** — we need **{cfg.greptile.target_score}/5** "
+                            f"before a human will merge it.")
+                feedback = review.render()
 
             task = self.store.update(task.issue_number, iteration=task.iteration + 1)
             if task.iteration >= cfg.loop.max_iterations:
@@ -384,7 +422,7 @@ class Orchestrator:
             if task.cost_usd >= cfg.safety.max_cost_per_issue_usd:
                 raise Parked(f"budget exhausted (${task.cost_usd:.2f}); best score {task.best_score}/5")
 
-            await self._revise(task, review, path)
+            await self._revise(task, path, why, headline, feedback)
             task = self.store.get(task.issue_number)  # type: ignore[assignment]
 
     async def _get_review(self, task: Task) -> ReviewResult | None:
@@ -404,9 +442,26 @@ class Orchestrator:
             retriggers_used=task.retriggers, on_retrigger=bump,
         )
 
-    async def _revise(self, task: Task, review: ReviewResult, path: Path) -> Task:
+    async def _wait_for_ci(self, task: Task) -> dict[str, Any]:
+        """The PR view once CI on the current head settles. Parks if it never does."""
+        self.store.set_state(task.issue_number, State.SCORED,
+                             f"waiting for CI on {(task.head_sha or '')[:7]}")
+        view = await ci.wait_for_ci(
+            self.gh, task.pr_number, head_sha=task.head_sha,  # type: ignore[arg-type]
+            timeout_sec=self.cfg.loop.ci_timeout_sec,
+            poll_sec=self.cfg.greptile.poll_interval_sec)
+        if view is None:
+            raise Parked(f"CI still running after {self.cfg.loop.ci_timeout_sec // 60}m")
+        _, failing = ci.verdict(view.get("statusCheckRollup") or [])
+        if failing:
+            names = ", ".join(c.get("name") or c.get("context") or "?" for c in failing)
+            self.store.event(task.issue_number, f"CI failing: {names}")
+        return view
+
+    async def _revise(self, task: Task, path: Path, why: str, headline: str,
+                      feedback: str) -> Task:
         self.store.set_state(task.issue_number, State.REVISING,
-                             f"revising after {review.score}/5 (round {task.iteration})")
+                             f"revising after {why} (round {task.iteration})")
         prompt = render(
             "address_review.md",
             REPO=self.cfg.repo.slug,
@@ -415,11 +470,10 @@ class Orchestrator:
             BASE_BRANCH=self.cfg.repo.base_branch,
             ISSUE_NUMBER=task.issue_number,
             PR_NUMBER=task.pr_number,
-            SCORE=review.score,
-            TARGET_SCORE=self.cfg.greptile.target_score,
+            HEADLINE=headline,
             ITERATION=task.iteration,
             MAX_ITERATIONS=self.cfg.loop.max_iterations,
-            REVIEW=review.render(),
+            REVIEW=feedback,
         )
         before = await asyncio.to_thread(self.wt.head_sha, path)
         result = await self._run_agent(task, f"revise-{task.iteration}", prompt, path,

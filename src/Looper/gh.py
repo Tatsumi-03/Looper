@@ -109,11 +109,17 @@ class GH:
                      f"label #{number} {label}")
 
     def remove_label(self, number: int, label: str) -> None:
+        self._remove_label("issue", number, label)
+
+    def _remove_label(self, kind: str, number: int, label: str) -> None:
+        """A label that doesn't exist is already removed; any other failure raises."""
         try:
-            self._mutate(["issue", "edit", str(number), "--repo", self.slug, "--remove-label", label],
-                         f"unlabel #{number} {label}")
-        except GHError as exc:  # label may not be present
-            log.debug("remove_label ignored: %s", exc)
+            self._mutate([kind, "edit", str(number), "--repo", self.slug, "--remove-label", label],
+                         f"unlabel {kind} #{number} {label}")
+        except GHError as exc:
+            if "not found" not in exc.stderr.lower():
+                raise
+            log.debug("remove %s label ignored: %s", kind, exc)
 
     def ensure_label(self, label: str, color: str = "5319e7") -> None:
         if self.dry_run:
@@ -169,6 +175,14 @@ class GH:
         out = self.api(f"repos/{self.slug}/commits/{sha}/check-runs?per_page=100")
         return (out or {}).get("check_runs", [])
 
+    def failed_job_log(self, job_id: str) -> str:
+        """Log of the failed steps of one Actions job; '' if GitHub won't give it up."""
+        try:
+            return self._run(["run", "view", "--job", job_id, "--log-failed", "--repo", self.slug]) or ""
+        except GHError as exc:
+            log.debug("failed_job_log(%s): %s", job_id, exc)
+            return ""
+
     # --- misc ------------------------------------------------------------
     def default_branch(self) -> str:
         out = self._run(["repo", "view", self.slug, "--json", "defaultBranchRef"], parse_json=True)
@@ -190,3 +204,6 @@ class GH:
         self.ensure_label(label)
         self._mutate(["pr", "edit", str(number), "--repo", self.slug, "--add-label", label],
                      f"label PR #{number} {label}")
+
+    def remove_pr_label(self, number: int, label: str) -> None:
+        self._remove_label("pr", number, label)

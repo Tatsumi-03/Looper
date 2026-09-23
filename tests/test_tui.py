@@ -1,8 +1,30 @@
+import asyncio
 import curses
+import json
+import threading
+import time
+from datetime import datetime, timezone
 
 from Looper.config import Config, RepoCfg
-from Looper.state import State, Store
-from Looper.tui import act, navigate, scroll_log, visible_log
+from Looper.gh import GHError
+from Looper.state import State, Store, Task
+from Looper.tui import (_start_daemon, act, ago, navigate, scroll_log, summary, transcript,
+                        visible_log)
+
+
+def test_ago_picks_largest_whole_unit():
+    now = datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc)
+    assert ago("2026-01-02T11:59:15+00:00", now) == "45s"
+    assert ago("2026-01-02T11:48:00+00:00", now) == "12m"
+    assert ago("2026-01-02T09:00:00+00:00", now) == "3h"
+    assert ago("2025-12-31T11:00:00+00:00", now) == "2d"
+    assert ago("", now) == "-"                           # task row without a timestamp
+
+
+def test_summary_counts_by_attention_group():
+    tasks = [Task(issue_number=n, state=s) for n, s in enumerate([
+        State.SOLVING, State.REVISING, State.AWAITING_REVIEW, State.PARKED, State.PENDING])]
+    assert summary(tasks) == "2 working · 1 review · 1 parked"   # PENDING and empty groups omitted
 
 
 def test_visible_log_shows_tail_by_default():
@@ -77,6 +99,55 @@ def test_act_start_agent_leaves_active_task_alone(tmp_path):
     store.close()
 
 
+class _LabelGH:
+    def __init__(self, fail_pr=False):
+        self.removed = []
+        self.fail_pr = fail_pr
+
+    def remove_label(self, number, label):
+        self.removed.append(("issue", number, label))
+
+    def remove_pr_label(self, number, label):
+        if self.fail_pr:
+            raise GHError(["pr", "edit"], 1, "HTTP 403: Resource not accessible")
+        self.removed.append(("pr", number, label))
+
+
+def test_act_requeue_only_parked_and_drops_needs_human(tmp_path):
+    store = Store(tmp_path / "looper.db")
+    cfg = Config(repo=RepoCfg(slug="o/n"), root=tmp_path)
+    orch = type("Orch", (), {"gh": _LabelGH()})()
+    store.create(5, "wip")
+    store.set_state(5, State.SOLVING, "running")
+
+    msg = act(ord("e"), store.get(5), store, cfg, orch, None)
+    assert store.get(5).state == State.SOLVING         # active task untouched
+    assert orch.gh.removed == []
+    assert "not requeued" in msg
+
+    store.set_state(5, State.PARKED, "parked for test", error="boom", pr_number=42)
+    act(ord("e"), store.get(5), store, cfg, orch, None)
+    assert store.get(5).state == State.PR_OPEN         # keeps its PR, re-enters review
+    assert store.get(5).error is None
+    assert orch.gh.removed == [("issue", 5, "agent:needs-human"),
+                               ("pr", 42, "agent:needs-human")]
+    store.close()
+
+
+def test_act_requeue_keeps_task_parked_when_label_removal_fails(tmp_path):
+    store = Store(tmp_path / "looper.db")
+    cfg = Config(repo=RepoCfg(slug="o/n"), root=tmp_path)
+    orch = type("Orch", (), {"gh": _LabelGH(fail_pr=True)})()
+    store.create(6, "wip")
+    store.set_state(6, State.PARKED, "parked for test", error="boom", pr_number=43)
+
+    msg = act(ord("e"), store.get(6), store, cfg, orch, None)
+    assert store.get(6).state == State.PARKED          # still parked, so `e` can retry
+    assert store.get(6).error == "boom"
+    assert "still parked" in msg
+    store.close()
+
+
 def test_act_clean_refuses_active_task(tmp_path):
     store = Store(tmp_path / "looper.db")
     cfg = Config(repo=RepoCfg(slug="o/n"), root=tmp_path)
@@ -84,3 +155,66 @@ def test_act_clean_refuses_active_task(tmp_path):
     msg = act(ord("c"), store.get(2), store, cfg, None, None)
     assert "not cleaned" in msg
     store.close()
+
+
+class _FakeOrch:
+    """Stands in for Orchestrator — just enough for _start_daemon's contract."""
+
+    def __init__(self):
+        self.shutdown = asyncio.Event()
+        self.runs = 0
+
+    async def run_daemon(self, *, install_signals=True):
+        self.runs += 1
+        await self.shutdown.wait()
+
+
+def test_daemon_thread_toggles_off_and_on():
+    loop = asyncio.new_event_loop()
+    orch = _FakeOrch()
+    thread = _start_daemon(loop, orch)
+    time.sleep(0.05)
+    assert thread.is_alive()
+
+    loop.call_soon_threadsafe(orch.shutdown.set)
+    thread.join(timeout=2)
+    assert not thread.is_alive()  # 'D' toggles off
+
+    thread = _start_daemon(loop, orch)  # 'D' toggles back on — same loop, fresh thread
+    time.sleep(0.05)
+    assert thread.is_alive()
+    assert orch.runs == 2
+
+    loop.call_soon_threadsafe(orch.shutdown.set)
+    thread.join(timeout=2)
+    loop.close()
+
+
+def test_transcript_renders_runs_in_order(tmp_path):
+    def run(name, *msgs):
+        (tmp_path / name).write_text("\n".join(json.dumps(m) for m in msgs) + "\nnot json\n")
+
+    run("100-revise-100.jsonl", {"type": "result", "subtype": "error_max_turns"})
+    run("01-revise.jsonl", {"type": "result", "subtype": "success", "num_turns": 2,
+                            "total_cost_usd": 0.5, "result": "fixed review"})
+    run("00-solve.jsonl",
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "reading the code"},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "clean"}]}})
+    (tmp_path / "00-solve.prompt.md").write_text("not a transcript")
+
+    assert transcript(tmp_path).splitlines() == [
+        "══ 00-solve ".ljust(72, "═"),
+        "reading the code",
+        "→ Bash git status",       # tool calls shown; tool output and init noise skipped
+        "",
+        "══ 01-revise ".ljust(72, "═"),
+        "── success: 2 turns, $0.50",
+        "fixed review",
+        "",
+        "══ 100-revise-100 ".ljust(72, "═"),   # numeric order: a plain sort puts it first
+        "── error_max_turns: 0 turns, $0.00",
+    ]
+    assert transcript(tmp_path / "missing") == ""   # task that never ran an agent
