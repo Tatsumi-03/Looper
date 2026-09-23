@@ -213,6 +213,7 @@ watching one. The task table is on top, a scrollable daemon log below it.
 | `j` / `k` | move down / up the task list |
 | `a` | start an agent on the selected issue now (un-parks it first if needed) |
 | `r` | reset a task's state and let the next poll cycle pick it up |
+| `e` | requeue a parked task and drop its `agent:needs-human` label |
 | `x` | park a task by hand |
 | `c` | delete a finished task's worktree |
 | `PgUp` / `PgDn` | scroll the log; `PgDn` back to the bottom resumes following |

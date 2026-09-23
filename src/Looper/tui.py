@@ -20,7 +20,7 @@ import threading
 from datetime import datetime, timezone
 
 from .config import Config
-from .orchestrator import Orchestrator
+from .orchestrator import LABEL_NEEDS_HUMAN, Orchestrator
 from .state import State, Store, Task
 from .worktree import Worktrees
 
@@ -29,7 +29,7 @@ log = logging.getLogger("looper.tui")
 REFRESH_MS = 2000
 LOG_MAXLINES = 2000
 LOG_MIN_HEIGHT = 5
-HELP = "j/k move  a start  r retry  x abandon  c clean  d daemon  PgUp/PgDn log  q quit"
+HELP = "j/k move  a start  r retry  e requeue  x abandon  c clean  d daemon  PgUp/PgDn log  q quit"
 HEADER = (f"{'ISSUE':>6}  {'STATE':<16} {'PR':>5}  {'IT':>2} {'SCORE':>5} {'BEST':>4} "
           f"{'COST':>7} {'AGO':>4}  TITLE")
 
@@ -146,7 +146,7 @@ def _init_colors() -> None:
 
 def act(key: int, task: Task, store: Store, cfg: Config,
         orch: Orchestrator | None, loop: asyncio.AbstractEventLoop | None) -> str:
-    """Apply a/r/x/c to one task. a/r resume the daemon's own spawn machinery
+    """Apply a/r/e/x/c to one task. a/r resume the daemon's own spawn machinery
     (loop.call_soon_threadsafe -> Orchestrator._spawn) instead of duplicating it."""
     if key == ord("a"):
         if task.is_terminal:
@@ -159,6 +159,16 @@ def act(key: int, task: Task, store: Store, cfg: Config,
         state = State.PR_OPEN if task.pr_number else State.PENDING
         store.set_state(task.issue_number, state, "retried from tui", error=None)
         return f"#{task.issue_number} -> {state}"
+    if key == ord("e"):
+        if task.state != State.PARKED:
+            return f"#{task.issue_number} not parked — not requeued"
+        state = State.PR_OPEN if task.pr_number else State.PENDING
+        store.set_state(task.issue_number, state, "requeued from tui", error=None)
+        if orch is not None:
+            orch.gh.remove_label(task.issue_number, LABEL_NEEDS_HUMAN)
+            if task.pr_number:
+                orch.gh.remove_pr_label(task.pr_number, LABEL_NEEDS_HUMAN)
+        return f"#{task.issue_number} requeued -> {state}"
     if key == ord("x"):
         store.set_state(task.issue_number, State.PARKED, "abandoned from tui",
                          error="abandoned by operator")
@@ -250,7 +260,7 @@ def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
             else:
                 daemon_thread = _start_daemon(loop, orch)
                 status = "daemon: starting"
-        elif key in (ord("a"), ord("r"), ord("x"), ord("c")) and tasks:
+        elif key in (ord("a"), ord("r"), ord("e"), ord("x"), ord("c")) and tasks:
             status = act(key, tasks[selected], store, cfg, orch, loop)
 
 

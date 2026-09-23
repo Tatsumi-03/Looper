@@ -198,3 +198,10 @@ class GH:
         self.ensure_label(label)
         self._mutate(["pr", "edit", str(number), "--repo", self.slug, "--add-label", label],
                      f"label PR #{number} {label}")
+
+    def remove_pr_label(self, number: int, label: str) -> None:
+        try:
+            self._mutate(["pr", "edit", str(number), "--repo", self.slug, "--remove-label", label],
+                         f"unlabel PR #{number} {label}")
+        except GHError as exc:  # label may not be present
+            log.debug("remove_pr_label ignored: %s", exc)

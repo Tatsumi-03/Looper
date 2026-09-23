@@ -96,6 +96,38 @@ def test_act_start_agent_leaves_active_task_alone(tmp_path):
     store.close()
 
 
+class _LabelGH:
+    def __init__(self):
+        self.removed = []
+
+    def remove_label(self, number, label):
+        self.removed.append(("issue", number, label))
+
+    def remove_pr_label(self, number, label):
+        self.removed.append(("pr", number, label))
+
+
+def test_act_requeue_only_parked_and_drops_needs_human(tmp_path):
+    store = Store(tmp_path / "looper.db")
+    cfg = Config(repo=RepoCfg(slug="o/n"), root=tmp_path)
+    orch = type("Orch", (), {"gh": _LabelGH()})()
+    store.create(5, "wip")
+    store.set_state(5, State.SOLVING, "running")
+
+    msg = act(ord("e"), store.get(5), store, cfg, orch, None)
+    assert store.get(5).state == State.SOLVING         # active task untouched
+    assert orch.gh.removed == []
+    assert "not requeued" in msg
+
+    store.set_state(5, State.PARKED, "parked for test", error="boom", pr_number=42)
+    act(ord("e"), store.get(5), store, cfg, orch, None)
+    assert store.get(5).state == State.PR_OPEN         # keeps its PR, re-enters review
+    assert store.get(5).error is None
+    assert orch.gh.removed == [("issue", 5, "agent:needs-human"),
+                               ("pr", 42, "agent:needs-human")]
+    store.close()
+
+
 def test_act_clean_refuses_active_task(tmp_path):
     store = Store(tmp_path / "looper.db")
     cfg = Config(repo=RepoCfg(slug="o/n"), root=tmp_path)
