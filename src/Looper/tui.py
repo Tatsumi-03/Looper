@@ -20,6 +20,7 @@ import threading
 from datetime import datetime, timezone
 
 from .config import Config
+from .gh import GHError
 from .orchestrator import LABEL_NEEDS_HUMAN, Orchestrator
 from .state import State, Store, Task
 from .worktree import Worktrees
@@ -162,12 +163,16 @@ def act(key: int, task: Task, store: Store, cfg: Config,
     if key == ord("e"):
         if task.state != State.PARKED:
             return f"#{task.issue_number} not parked — not requeued"
+        # labels first: if GitHub refuses, the task stays PARKED so `e` can be retried
+        if orch is not None:
+            try:
+                orch.gh.remove_label(task.issue_number, LABEL_NEEDS_HUMAN)
+                if task.pr_number:
+                    orch.gh.remove_pr_label(task.pr_number, LABEL_NEEDS_HUMAN)
+            except GHError as exc:
+                return f"#{task.issue_number} still parked — could not drop label: {exc}"
         state = State.PR_OPEN if task.pr_number else State.PENDING
         store.set_state(task.issue_number, state, "requeued from tui", error=None)
-        if orch is not None:
-            orch.gh.remove_label(task.issue_number, LABEL_NEEDS_HUMAN)
-            if task.pr_number:
-                orch.gh.remove_pr_label(task.pr_number, LABEL_NEEDS_HUMAN)
         return f"#{task.issue_number} requeued -> {state}"
     if key == ord("x"):
         store.set_state(task.issue_number, State.PARKED, "abandoned from tui",

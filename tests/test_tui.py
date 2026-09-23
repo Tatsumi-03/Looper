@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 
 from Looper.config import Config, RepoCfg
+from Looper.gh import GHError
 from Looper.state import State, Store, Task
 from Looper.tui import _start_daemon, act, ago, navigate, scroll_log, summary, visible_log
 
@@ -97,13 +98,16 @@ def test_act_start_agent_leaves_active_task_alone(tmp_path):
 
 
 class _LabelGH:
-    def __init__(self):
+    def __init__(self, fail_pr=False):
         self.removed = []
+        self.fail_pr = fail_pr
 
     def remove_label(self, number, label):
         self.removed.append(("issue", number, label))
 
     def remove_pr_label(self, number, label):
+        if self.fail_pr:
+            raise GHError(["pr", "edit"], 1, "HTTP 403: Resource not accessible")
         self.removed.append(("pr", number, label))
 
 
@@ -125,6 +129,20 @@ def test_act_requeue_only_parked_and_drops_needs_human(tmp_path):
     assert store.get(5).error is None
     assert orch.gh.removed == [("issue", 5, "agent:needs-human"),
                                ("pr", 42, "agent:needs-human")]
+    store.close()
+
+
+def test_act_requeue_keeps_task_parked_when_label_removal_fails(tmp_path):
+    store = Store(tmp_path / "looper.db")
+    cfg = Config(repo=RepoCfg(slug="o/n"), root=tmp_path)
+    orch = type("Orch", (), {"gh": _LabelGH(fail_pr=True)})()
+    store.create(6, "wip")
+    store.set_state(6, State.PARKED, "parked for test", error="boom", pr_number=43)
+
+    msg = act(ord("e"), store.get(6), store, cfg, orch, None)
+    assert store.get(6).state == State.PARKED          # still parked, so `e` can retry
+    assert store.get(6).error == "boom"
+    assert "still parked" in msg
     store.close()
 
 

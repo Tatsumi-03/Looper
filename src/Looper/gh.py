@@ -109,11 +109,17 @@ class GH:
                      f"label #{number} {label}")
 
     def remove_label(self, number: int, label: str) -> None:
+        self._remove_label("issue", number, label)
+
+    def _remove_label(self, kind: str, number: int, label: str) -> None:
+        """A label that doesn't exist is already removed; any other failure raises."""
         try:
-            self._mutate(["issue", "edit", str(number), "--repo", self.slug, "--remove-label", label],
-                         f"unlabel #{number} {label}")
-        except GHError as exc:  # label may not be present
-            log.debug("remove_label ignored: %s", exc)
+            self._mutate([kind, "edit", str(number), "--repo", self.slug, "--remove-label", label],
+                         f"unlabel {kind} #{number} {label}")
+        except GHError as exc:
+            if "not found" not in exc.stderr.lower():
+                raise
+            log.debug("remove %s label ignored: %s", kind, exc)
 
     def ensure_label(self, label: str, color: str = "5319e7") -> None:
         if self.dry_run:
@@ -200,8 +206,4 @@ class GH:
                      f"label PR #{number} {label}")
 
     def remove_pr_label(self, number: int, label: str) -> None:
-        try:
-            self._mutate(["pr", "edit", str(number), "--repo", self.slug, "--remove-label", label],
-                         f"unlabel PR #{number} {label}")
-        except GHError as exc:  # label may not be present
-            log.debug("remove_pr_label ignored: %s", exc)
+        self._remove_label("pr", number, label)
