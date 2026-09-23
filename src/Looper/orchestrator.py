@@ -24,6 +24,7 @@ PROMPTS = Path(__file__).parent / "prompts"
 LABEL_IN_PROGRESS = "agent:in-progress"
 LABEL_READY = "agent:ready"
 LABEL_NEEDS_HUMAN = "agent:needs-human"
+PRIORITY_LABELS = ("p0", "p1", "p2")  # highest first; unlabelled issues rank last
 ABORT_TOKEN = "HARNESS_ABORT:"
 MARKER = "<!-- looper -->"
 PR_BODY_RE = re.compile(r"<pr-description>(.*?)</pr-description>", re.S | re.I)
@@ -42,12 +43,14 @@ def render(template: str, **vars: Any) -> str:
 
 def trackable_issues(gh: GH, cfg: Config, store: Store) -> list[dict[str, Any]]:
     """Open issues opted in (if `only_labels` is set), not skip-labelled, and not
-    already claimed by another runner.
+    already claimed by another runner — ordered p0, p1, p2, then unlabelled,
+    oldest first within each.
 
     Shared by the daemon's poll loop and the TUI's own issue discovery, so both
     apply the same skip-label / in-progress rules instead of drifting apart.
     """
     out = []
+    rank: dict[int, int] = {}
     for issue in gh.list_open_issues():
         labels = {l["name"].lower() for l in issue.get("labels", [])}
         if labels & {s.lower() for s in cfg.loop.skip_labels}:
@@ -59,7 +62,11 @@ def trackable_issues(gh: GH, cfg: Config, store: Store) -> list[dict[str, Any]]:
             log.info("#%s already labelled %s by another runner — skipping",
                      issue["number"], LABEL_IN_PROGRESS)
             continue
+        rank[issue["number"]] = min(
+            (PRIORITY_LABELS.index(l) for l in labels if l in PRIORITY_LABELS),
+            default=len(PRIORITY_LABELS))
         out.append(issue)
+    out.sort(key=lambda i: (rank[i["number"]], i["number"]))
     return out
 
 
