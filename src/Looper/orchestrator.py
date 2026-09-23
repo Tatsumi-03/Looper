@@ -176,6 +176,7 @@ class Orchestrator:
         issues = await asyncio.to_thread(trackable_issues, self.gh, self.cfg, self.store)
         await asyncio.to_thread(check_merged, self.gh, self.store)
         self._heartbeat(len(issues))
+        open_prs = self.store.open_pr_count()
         for issue in issues:
             if self.shutdown.is_set():
                 return
@@ -185,7 +186,7 @@ class Orchestrator:
             task = self.store.get(number)
             if task and task.is_terminal:
                 continue
-            if self.store.open_pr_count() >= self.cfg.loop.max_open_prs:
+            if open_prs >= self.cfg.loop.max_open_prs:
                 log.info("max_open_prs=%d reached — holding off", self.cfg.loop.max_open_prs)
                 return
             if task is None:
