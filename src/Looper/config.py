@@ -91,7 +91,9 @@ class Config:
 
     @property
     def var_dir(self) -> Path:
-        return self.root / "var"
+        """This repo's state: db, logs, worktrees, locks. An issue number only means
+        something inside one repo, so each repo gets its own folder."""
+        return self.root / "var" / self.repo.slug.replace("/", "__")
 
     @property
     def db_path(self) -> Path:
@@ -107,7 +109,7 @@ class Config:
 
     @property
     def repos_dir(self) -> Path:
-        return self.var_dir / "repos"
+        return self.root / "var" / "repos"  # clones are shared, each already named by slug
 
     def branch_for(self, issue: int) -> str:
         return f"{self.safety.branch_prefix}{issue}"

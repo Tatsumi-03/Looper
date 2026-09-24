@@ -60,8 +60,9 @@ To run `looper` from any folder, add the checkout to your `PATH`
 export PATH="$HOME/dev/Looper:$PATH"   # wherever you cloned it
 ```
 
-`looper.toml` and `var/` (worktrees, logs, state) always stay in the checkout, whatever
-folder you run from. Set `LOOPER_HOME` to keep them somewhere else.
+`looper.toml` and `var/` always stay in the checkout, whatever folder you run from.
+Each repo gets its own `var/<owner>__<name>/` (state, logs, worktrees); clones are shared
+in `var/repos/`. Set `LOOPER_HOME` to keep them somewhere else.
 
 Or put a `looper` command on your `PATH` (a venv keeps it off your system Python):
 
@@ -119,7 +120,7 @@ missing before anything touches a real repo.
 
 ## How it works
 
-**State lives in SQLite** (`var/looper.db`), not in memory. Every transition is recorded,
+**State lives in SQLite** (`var/<owner>__<name>/looper.db`, one per repo), not in memory. Every transition is recorded,
 so a daemon restart resumes each task from where it stopped instead of re-solving the issue
 or opening a second PR.
 
@@ -187,7 +188,7 @@ See `src/Looper/looper.toml.example` for every option. The ones worth knowing:
 - the agent's tool allowlist excludes `gh`, `git push`, `git remote`, `sudo`, `rm -rf`
 - `--permission-prompts none`: an unexpected tool call is denied, not left hanging
 - per-run and per-issue dollar ceilings
-- one daemon per checkout (`var/daemon.lock`), one worker per issue (`var/locks/`)
+- one daemon per repo (`var/<owner>__<name>/daemon.lock`), one worker per issue (`…/locks/`)
 - `dry_run` and `--fake-review` let you rehearse the whole loop before it can touch anything
 
 OS-level sandboxing (Claude Code's `--sandbox`, via bubblewrap on Linux) is a planned
@@ -210,7 +211,7 @@ src/Looper/
 var/               db, logs, worktrees, clones  (gitignored)
 ```
 
-Agent transcripts land in `var/logs/issue-<n>/` — the prompt, the full `stream-json`
+Agent transcripts land in `var/<owner>__<name>/logs/issue-<n>/` — the prompt, the full `stream-json`
 transcript, and the review text for every round.
 
 ## TUI
