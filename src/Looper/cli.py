@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
+import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -64,21 +67,123 @@ def build(cfg: Config) -> tuple[Store, GH, Worktrees, Orchestrator]:
 # --------------------------------------------------------------------- #
 # commands
 # --------------------------------------------------------------------- #
+MODEL_ALIASES = ("sonnet", "opus", "haiku")
+GITHUB_PREFIXES = ("https://github.com/", "http://github.com/", "git@github.com:", "github.com/")
+
+
+def _ask(question: str, default: str = "") -> str:
+    answer = input(f"{question} [{default}]: " if default else f"{question}: ").strip()
+    return answer or default
+
+
+def _answer(flag: str | None, question: str, default: str, check):
+    """The flag's value, else ask until `check` accepts. `check` returns the value to
+    keep, or prints why not and returns None. A bad flag fails instead of asking."""
+    while True:
+        value = check(flag or _ask(question, default))
+        if value is not None or flag:
+            return value
+
+
+def repo_slug(text: str) -> str:
+    """'acme/api', 'https://github.com/acme/api' or 'git@github.com:acme/api.git' -> 'acme/api'."""
+    s = text.strip().rstrip("/").removesuffix(".git")
+    return next((s[len(p):] for p in GITHUB_PREFIXES if s.startswith(p)), s)
+
+
+def _cwd_repo() -> str:
+    """owner/name of the GitHub repo the current folder is a clone of, else ''."""
+    proc = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner",
+                           "--jq", ".nameWithOwner"], capture_output=True, text=True)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _say_no(msg: str) -> None:
+    print(f"  {msg}", file=sys.stderr)
+
+
+def _check_repo(answer: str) -> dict | None:
+    slug = repo_slug(answer)
+    if slug.count("/") != 1 or not all(slug.split("/")):
+        return _say_no("expected owner/name, e.g. acme/api")
+    try:
+        return GH(slug).api(f"repos/{slug}")
+    except GHError as exc:
+        reason = (exc.stderr.strip().splitlines() or ["no reason given"])[-1]
+        return _say_no(f"can't open {slug} on GitHub: {reason}")
+
+
+def _check_model(answer: str) -> str | None:
+    if answer in MODEL_ALIASES or answer.startswith("claude-"):
+        return answer
+    return _say_no(f"unknown model {answer!r}: use {', '.join(MODEL_ALIASES)} or a claude-… id")
+
+
+def _set(text: str, key: str, value: str) -> str:
+    """Rewrite the first `key = "..."` line of the template; loud if the template moved on."""
+    new, hits = re.subn(rf'^{key} = ".*"', f"{key} = {json.dumps(value)}", text,
+                        count=1, flags=re.M)
+    if not hits:
+        raise ConfigError(f"looper.toml.example has no `{key} = \"...\"` line to fill in")
+    return new
+
+
 def cmd_init(args: argparse.Namespace) -> int:
+    """Ask for the repo, base branch and model (flags skip each question), check them
+    against GitHub, write looper.toml, create the opt-in label, then run doctor."""
     target = Path(args.config) if args.config else config_mod.home() / "looper.toml"
-    if target.exists() and not args.force:
-        print(f"{target} already exists (use --force to overwrite)", file=sys.stderr)
-        return 1
     example = _example()
     if example is None:
         print("template looper.toml.example not found", file=sys.stderr)
         return 1
-    text = example.read_text().replace('slug = "owner/name"', f'slug = "{args.repo}"')
-    if args.base_branch:
-        text = text.replace('base_branch = "main"', f'base_branch = "{args.base_branch}"')
+    if not shutil.which("gh"):
+        print("gh not found on PATH, install it first: https://cli.github.com", file=sys.stderr)
+        return 1
+
+    current = None
+    if target.exists():
+        try:
+            current = config_mod.load(target)
+        except ConfigError:
+            pass  # a broken file is exactly what init is for
+        if not args.force and _ask(f"{target} exists, overwrite? (y/N)").lower() != "y":
+            print(f"left {target} as it is")
+            return 1
+
+    suggested = "" if args.repo else _cwd_repo() or (current.repo.slug if current else "")
+    info = _answer(args.repo, "Repository (owner/name or GitHub URL)", suggested, _check_repo)
+    if info is None:
+        return 1
+    repo = info["full_name"]
+    gh = GH(repo)
+
+    def check_branch(name: str) -> str | None:
+        try:
+            gh.api(f"repos/{repo}/branches/{name}")
+            return name
+        except GHError:
+            return _say_no(f"{repo} has no branch {name!r}")
+
+    same_repo = current is not None and current.repo.slug == repo
+    base = _answer(args.base_branch, "Base branch (PRs target this)",
+                   current.repo.base_branch if same_repo else info["default_branch"], check_branch)
+    model = _answer(args.model, f"Model ({'/'.join(MODEL_ALIASES)})",
+                    current.agent.model if current else "sonnet", _check_model)
+    if base is None or model is None:
+        return 1
+
+    text = example.read_text()
+    for key, value in (("slug", repo), ("base_branch", base), ("model", model)):
+        text = _set(text, key, value)
     target.write_text(text)
-    print(f"wrote {target} for {args.repo}")
-    return 0
+    print(f"\nwrote {target}: {repo} on {base}, model {model}")
+    for label in config_mod.LoopCfg().only_labels:
+        if gh.ensure_label(label):
+            print(f'label "{label}" is on {repo}, add it to an issue to queue that issue')
+        else:
+            print(f'could not create label "{label}" on {repo}, add it on GitHub yourself')
+    print()
+    return cmd_doctor(args)
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
@@ -284,9 +389,10 @@ def main(argv: list[str] | None = None) -> int:
     runner(o)
     o.set_defaults(fn=cmd_once)
 
-    i = sub.add_parser("init", help="write a looper.toml")
-    i.add_argument("--repo", required=True, metavar="owner/name")
-    i.add_argument("--base-branch")
+    i = sub.add_parser("init", help="set up looper.toml (asks for the repo and model)")
+    i.add_argument("--repo", metavar="owner/name", help="skip the repo question")
+    i.add_argument("--model", help="skip the model question")
+    i.add_argument("--base-branch", help="default: the repo's default branch")
     i.add_argument("--force", action="store_true")
     i.set_defaults(fn=cmd_init)
 
@@ -329,6 +435,9 @@ def main(argv: list[str] | None = None) -> int:
     except BrokenPipeError:  # `looper show 9 | head` closes the pipe early
         sys.stdout.close()
         return 0
+    except EOFError:  # init read from a closed stdin
+        print("\nno input: run init in a terminal, or pass --repo and --model", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         return 130
 

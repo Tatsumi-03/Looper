@@ -140,7 +140,7 @@ def load(path: str | Path | None = None, root: Path | None = None) -> Config:
     cfg_path = Path(path) if path else root / "looper.toml"
     if not cfg_path.exists():
         raise ConfigError(
-            f"no config at {cfg_path} — copy looper.toml.example or run `looper init --repo owner/name`"
+            f"no config at {cfg_path} — copy looper.toml.example or run `looper init`"
         )
     raw = tomllib.loads(cfg_path.read_text())
 

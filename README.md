@@ -74,7 +74,7 @@ python3 -m venv .venv
 **4. Point it at a repo**
 
 ```bash
-./looper init --repo owner/name        # writes looper.toml
+./looper init                          # asks for repo, base branch and model
 $EDITOR looper.toml                    # model, budgets, concurrency, skip labels
 ```
 
@@ -115,7 +115,7 @@ missing before anything touches a real repo.
 | `abandon <issue> [--clean]` | park a task by hand |
 | `clean [--all]` | delete worktrees of finished tasks |
 | `doctor` | verify config, tooling and GitHub access |
-| `init --repo owner/name` | write a starter `looper.toml` |
+| `init [--repo owner/name] [--base-branch b] [--model m]` | ask for the repo, base branch and model (checked against GitHub), write `looper.toml`, create the `agent` label, run `doctor` |
 
 ## How it works
 
