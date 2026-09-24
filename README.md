@@ -53,6 +53,16 @@ Straight from the checkout, no install:
 ./looper --help
 ```
 
+To run `looper` from any folder, add the checkout to your `PATH`
+(put the line in `~/.bashrc` or `~/.zshrc`):
+
+```bash
+export PATH="$HOME/dev/Looper:$PATH"   # wherever you cloned it
+```
+
+`looper.toml` and `var/` (worktrees, logs, state) always stay in the checkout, whatever
+folder you run from. Set `LOOPER_HOME` to keep them somewhere else.
+
 Or put a `looper` command on your `PATH` (a venv keeps it off your system Python):
 
 ```bash

@@ -65,7 +65,7 @@ def build(cfg: Config) -> tuple[Store, GH, Worktrees, Orchestrator]:
 # commands
 # --------------------------------------------------------------------- #
 def cmd_init(args: argparse.Namespace) -> int:
-    target = Path(args.config or "looper.toml")
+    target = Path(args.config) if args.config else config_mod.home() / "looper.toml"
     if target.exists() and not args.force:
         print(f"{target} already exists (use --force to overwrite)", file=sys.stderr)
         return 1

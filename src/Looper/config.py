@@ -15,6 +15,12 @@ class ConfigError(Exception):
     pass
 
 
+def home() -> Path:
+    """Where looper.toml and var/ live: $LOOPER_HOME (the ./looper launcher sets it
+    to the checkout), else the current directory."""
+    return Path(os.environ.get("LOOPER_HOME") or Path.cwd())
+
+
 @dataclass
 class RepoCfg:
     slug: str = ""
@@ -71,7 +77,7 @@ class Config:
     loop: LoopCfg = field(default_factory=LoopCfg)
     greptile: GreptileCfg = field(default_factory=GreptileCfg)
     safety: SafetyCfg = field(default_factory=SafetyCfg)
-    root: Path = field(default_factory=Path.cwd)
+    root: Path = field(default_factory=home)
     path: Path | None = None
 
     # --- derived ---------------------------------------------------------
@@ -129,8 +135,8 @@ def _build(cls: type, data: dict[str, Any], section: str) -> Any:
 
 
 def load(path: str | Path | None = None, root: Path | None = None) -> Config:
-    """Load looper.toml. Falls back to ./looper.toml."""
-    root = Path(root or Path.cwd()).resolve()
+    """Load looper.toml. Falls back to <home>/looper.toml (see home())."""
+    root = Path(root or home()).resolve()
     cfg_path = Path(path) if path else root / "looper.toml"
     if not cfg_path.exists():
         raise ConfigError(

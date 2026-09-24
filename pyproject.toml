@@ -17,3 +17,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 Looper = ["prompts/*.md", "looper.toml.example"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
