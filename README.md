@@ -76,8 +76,13 @@ python3 -m venv .venv
 
 ```bash
 ./looper init                          # asks for repo, base branch and model
-$EDITOR looper.toml                    # model, budgets, concurrency, skip labels
+./looper init                          # again for each more repo you want Looper on
+$EDITOR looper.toml                    # budgets, concurrency, skip labels (shared by all repos)
 ```
+
+Each `init` adds a `[[repos]]` entry to `looper.toml`, or updates it when that repo is
+already there. With more than one repo, `looper tui` opens on a picker, and every other
+command takes `--repo owner/name`.
 
 **5. Check your setup**
 
@@ -108,7 +113,7 @@ missing before anything touches a real repo.
 | command | what it does |
 |---|---|
 | `daemon` | poll open issues and work them continuously |
-| `tui` | the daemon plus a live dashboard: task table, agent controls, scrollable log |
+| `tui [--repo owner/name]` | pick a repo, then the daemon plus a live dashboard: task table, agent controls, scrollable log |
 | `once <issue>` | drive a single issue end to end in the foreground |
 | `status` | table of every task: state, PR, score, cost |
 | `show <issue>` | full detail plus the event log for one issue |
@@ -116,7 +121,10 @@ missing before anything touches a real repo.
 | `abandon <issue> [--clean]` | park a task by hand |
 | `clean [--all]` | delete worktrees of finished tasks |
 | `doctor` | verify config, tooling and GitHub access |
-| `init [--repo owner/name] [--base-branch b] [--model m]` | ask for the repo, base branch and model (checked against GitHub), write `looper.toml`, create the `agent` label, run `doctor` |
+| `init [--repo owner/name] [--base-branch b] [--model m]` | add a repo (or update it): ask for the repo, base branch and model, checked against GitHub; create the `agent` label; run `doctor` |
+
+Every command except `init` also takes `--repo owner/name`, needed once `looper.toml` has
+more than one repo.
 
 ## How it works
 

@@ -3,16 +3,21 @@
 Embeds the daemon loop in a background thread so `looper tui` alone drives
 agents — no separate `looper daemon` process needed. Store is safe to share:
 it already uses check_same_thread=False plus an RLock (see state.py).
-Press `D` to stop or restart that thread without leaving the TUI, and `d` to
-page through the selected task's agent transcripts.
+Press `D` to stop or restart that thread without leaving the TUI, `d` to
+page through the selected task's agent transcripts, and `R` to switch repo.
 
 The daemon's `logging` output would otherwise land on stdout and corrupt the
 curses screen, so it's captured into an in-memory ring buffer instead and
 rendered as a scrollable panel at the bottom of the screen.
+
+It opens on a repo picker (skipped with `--repo`): a centred window over a
+darkened screen listing every [[repos]] entry, plus `+ add repo…`, which runs
+`looper init`'s questions and comes back.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import collections
 import curses
@@ -26,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .agent import tool_summary
-from .config import Config
+from .config import Config, ConfigError, load
 from .gh import GHError
 from .orchestrator import LABEL_NEEDS_HUMAN, Orchestrator
 from .state import State, Store, Task
@@ -38,7 +43,7 @@ REFRESH_MS = 2000
 LOG_MAXLINES = 2000
 LOG_MIN_HEIGHT = 5
 HELP = ("j/k move  a start  r retry  e requeue  x abandon  c clean  d transcript  D daemon  "
-        "PgUp/PgDn log  q quit")
+        "R repo  PgUp/PgDn log  q quit")
 HEADER = (f"{'ISSUE':>6}  {'STATE':<16} {'PR':>5}  {'IT':>2} {'SCORE':>5} {'BEST':>4} "
           f"{'COST':>7} {'AGO':>4}  TITLE")
 
@@ -51,6 +56,9 @@ GROUPS = {
 }
 COLORS = {"working": curses.COLOR_CYAN, "review": curses.COLOR_YELLOW,
           "ready": curses.COLOR_GREEN, "parked": curses.COLOR_RED}
+BACKDROP_PAIR = len(COLORS) + 1  # colour pair behind the repo picker
+ADD_REPO = "+ add repo…"
+PICK_HELP = " enter open · a add · q quit "
 
 
 class _BufferHandler(logging.Handler):
@@ -151,6 +159,99 @@ def _init_colors() -> None:
     curses.use_default_colors()
     for i, color in enumerate(COLORS.values(), start=1):
         curses.init_pair(i, color, -1)
+    # grey on true black (256-colour index 16, which themes leave alone): a shade
+    # darker than almost any terminal background, so the picker reads as a window
+    deep = curses.COLORS >= 256
+    curses.init_pair(BACKDROP_PAIR, 244 if deep else curses.COLOR_WHITE,
+                     16 if deep else curses.COLOR_BLACK)
+
+
+def _backdrop_attr() -> int:
+    if not curses.has_colors():
+        return curses.A_DIM
+    return curses.color_pair(BACKDROP_PAIR) | (0 if curses.COLORS >= 256 else curses.A_DIM)
+
+
+def _blank_backdrop(win, shade: int) -> None:
+    """Behind the picker at start, before any repo is open: just the frame."""
+    win.erase()
+    w = win.getmaxyx()[1]
+    win.addnstr(0, 0, " looper", w - 1, shade | curses.A_BOLD)
+    win.addnstr(1, 0, HEADER, w - 1, shade)
+
+
+def pick_repo(win, slugs: list[str], selected: int = 0, backdrop=_blank_backdrop) -> str | None:
+    """Centred chooser over a darkened screen: a slug, ADD_REPO, or None to quit.
+    `backdrop(win, shade)` draws what the picker covers, in `shade`."""
+    items = [*slugs, ADD_REPO]
+    selected = min(selected, len(items) - 1)
+    win.timeout(-1)  # the backdrop is frozen while the picker is up, so just wait for a key
+    while True:
+        h, w = win.getmaxyx()
+        shade = _backdrop_attr()
+        win.bkgd(" ", shade)
+        backdrop(win, shade)
+        rows = min(len(items), h - 3)  # border, items, blank line, border
+        bw = min(w, max(34, max(map(len, items)) + 8, len(PICK_HELP) + 4))
+        if rows < 1 or bw < 12:
+            win.addnstr(0, 0, "terminal too small", w - 1)
+            win.refresh()
+        else:
+            top = max(0, selected - rows + 1)  # scroll once repos outgrow the screen
+            box = curses.newwin(rows + 3, bw, (h - rows - 3) // 2, (w - bw) // 2)
+            box.box()
+            box.addnstr(0, 2, " looper ", bw - 4, curses.A_BOLD)
+            box.addnstr(rows + 2, max(2, bw - len(PICK_HELP) - 2), PICK_HELP, bw - 4, curses.A_DIM)
+            for row, item in enumerate(items[top:top + rows]):
+                on = top + row == selected
+                attr = (_attr("working") | curses.A_BOLD if on
+                        else curses.A_DIM if item == ADD_REPO else 0)
+                box.addnstr(1 + row, 2, ("> " if on else "  ") + item, bw - 4, attr)
+            win.noutrefresh()
+            box.noutrefresh()
+            curses.doupdate()
+        key = win.getch()
+        if key in (ord("q"), 27):
+            return None
+        if key in (10, 13, curses.KEY_ENTER):
+            return items[selected]
+        if key == ord("a"):
+            return ADD_REPO
+        selected = navigate(key, len(items), selected)
+
+
+def _add_repo(win, path: Path) -> None:
+    """Run `looper init`'s questions on the plain terminal, then hand the screen back."""
+    from .cli import cmd_init  # local: cli imports tui lazily too
+    curses.endwin()
+    print("\nAdd a repo to Looper (Ctrl-C goes back)\n")
+    try:
+        try:
+            cmd_init(argparse.Namespace(config=str(path), repo=None, model=None, base_branch=None))
+        except ConfigError as exc:
+            print(f"config error: {exc}")
+        input("\nPress Enter to go back to Looper ")
+    except (KeyboardInterrupt, EOFError):
+        print()
+    win.refresh()
+
+
+def _choose(win, cfg: Config, current: str = "", backdrop=_blank_backdrop) -> Config | None:
+    """Picker until a repo is chosen, starting on `current`; after `+ add repo…` it
+    comes back with the new repo highlighted. None = the user backed out."""
+    slugs = [r.slug for r in cfg.repos]
+    selected = slugs.index(current) if current in slugs else 0
+    while True:
+        choice = pick_repo(win, [r.slug for r in cfg.repos], selected, backdrop)
+        if choice is None:
+            return None
+        if choice != ADD_REPO:
+            cfg.select(choice)
+            return cfg
+        before = len(cfg.repos)
+        _add_repo(win, cfg.path)
+        cfg = load(cfg.path, root=cfg.root)
+        selected = len(cfg.repos) - 1 if len(cfg.repos) > before else len(cfg.repos)
 
 
 def act(key: int, task: Task, store: Store, cfg: Config,
@@ -259,49 +360,59 @@ def _detail(t: Task) -> str:
 
 
 def _draw(win, cfg: Config, tasks: list[Task], selected: int, status: str,
-          log_lines: list[str], log_scroll: int, daemon_on: bool) -> None:
+          log_lines: list[str], log_scroll: int, daemon_on: bool, shade: int = 0) -> None:
+    """The dashboard. With `shade`, every line is drawn in it and nothing is shown yet:
+    that's the frozen backdrop the repo picker sits on."""
     win.erase()
     h, w = win.getmaxyx()
+
+    def put(y: int, x: int, text: str, n: int, attr: int) -> None:
+        win.addnstr(y, x, text, n, shade or attr)
+
     log_h = max(LOG_MIN_HEIGHT, h // 3)
     table_bottom = max(3, h - log_h - 3)  # -3: detail line, log divider, footer
 
     daemon = "● on" if daemon_on else "○ OFF"
     bar = f" looper  {cfg.repo.slug}   daemon {daemon}   {summary(tasks)}"
-    win.addnstr(0, 0, bar.ljust(w - 1), w - 1, curses.A_REVERSE | curses.A_BOLD)
-    win.addnstr(1, 0, HEADER, w - 1, curses.A_UNDERLINE)
+    put(0, 0, bar.ljust(w - 1), w - 1, curses.A_REVERSE | curses.A_BOLD)
+    put(1, 0, HEADER, w - 1, curses.A_UNDERLINE)
     if not tasks:
-        win.addnstr(2, 2, 'no tasks — label an issue "agent" to queue it', w - 3, curses.A_DIM)
+        put(2, 2, 'no tasks — label an issue "agent" to queue it', w - 3, curses.A_DIM)
     for i, t in enumerate(tasks):
         if 2 + i >= table_bottom:
             break
         attr = _attr(group(t.state)) | (curses.A_REVERSE if i == selected else 0)
-        win.addnstr(2 + i, 0, _row(t, w).ljust(w - 1), w - 1, attr)
+        put(2 + i, 0, _row(t, w).ljust(w - 1), w - 1, attr)
 
     if status or tasks:
-        win.addnstr(table_bottom, 0, status or _detail(tasks[selected]), w - 1, curses.A_BOLD)
+        put(table_bottom, 0, status or _detail(tasks[selected]), w - 1, curses.A_BOLD)
     following = "live" if log_scroll == 0 else f"scrolled back {log_scroll}"
-    win.addnstr(table_bottom + 1, 0, f"── log ({following}) ".ljust(w - 1, "─"), w - 1, curses.A_DIM)
+    put(table_bottom + 1, 0, f"── log ({following}) ".ljust(w - 1, "─"), w - 1, curses.A_DIM)
     log_top = table_bottom + 2
     for i, line in enumerate(visible_log(log_lines, h - 1 - log_top, log_scroll)):
         level = "parked" if " ERROR " in line else "review" if " WARNING " in line else None
-        win.addnstr(log_top + i, 0, line, w - 1, _attr(level))
-    win.addnstr(h - 1, 0, HELP, w - 1, curses.A_DIM)
-    win.refresh()
+        put(log_top + i, 0, line, w - 1, _attr(level))
+    put(h - 1, 0, HELP, w - 1, curses.A_DIM)
+    if not shade:
+        win.refresh()
+
+
+def _worklist(store: Store) -> list[Task]:
+    # merged work is done work — it stays in the db and in `looper status`,
+    # but the tui is a worklist, not a history
+    return [t for t in store.all_tasks() if t.state != State.MERGED]
 
 
 def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
           loop: asyncio.AbstractEventLoop, log_buf: collections.deque[str],
-          daemon_thread: threading.Thread) -> threading.Thread:
-    curses.curs_set(0)
-    _init_colors()
+          daemon_thread: threading.Thread) -> tuple[threading.Thread, bool]:
+    """Run the dashboard until q (-> False) or R (-> True: the user wants the repo picker)."""
     win.timeout(REFRESH_MS)
     selected = 0
     log_scroll = 0
     status = ""
     while True:
-        # merged work is done work — it stays in the db and in `looper status`,
-        # but the tui is a worklist, not a history
-        tasks = [t for t in store.all_tasks() if t.state != State.MERGED]
+        tasks = _worklist(store)
         selected = navigate(-1, len(tasks), selected)  # clamp after tasks may have shrunk
         lines = list(log_buf)
         h, _w = win.getmaxyx()
@@ -312,7 +423,9 @@ def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
 
         key = win.getch()
         if key in (ord("q"), 27):
-            return daemon_thread
+            return daemon_thread, False
+        if key == ord("R"):
+            return daemon_thread, True
         if key in (curses.KEY_UP, curses.KEY_DOWN, ord("j"), ord("k")):
             selected = navigate(key, len(tasks), selected)
         elif key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
@@ -348,17 +461,54 @@ def _start_daemon(loop: asyncio.AbstractEventLoop, orch: Orchestrator) -> thread
     return thread
 
 
-def run(cfg: Config) -> int:
+def run(cfg: Config, pick: bool = True) -> int:
+    """Pick a repo (unless --repo already did), then the dashboard with the daemon
+    embedded, until the user quits. `R` switches repo: the old repo's daemon takes no
+    new issues but lets its running agents finish in the background, and the new
+    repo's daemon starts straight away. Its per-issue locks stop a second agent
+    starting on an issue that's still running if you switch back early."""
     from .cli import build  # local: cli imports tui lazily too, avoid a module-level cycle
     log_buf = _capture_logs()
-    store, _gh, _wt, orch = build(cfg)
-    loop = asyncio.new_event_loop()
-    thread = _start_daemon(loop, orch)
+    daemons: list[dict] = []  # every repo opened this session, still draining or not
+
+    def session(win) -> None:
+        curses.curs_set(0)
+        _init_colors()
+        chosen = _choose(win, cfg) if pick else cfg
+        while chosen is not None:
+            win.bkgd(" ", 0)  # the picker's darkened background goes away with it
+            store, _gh, _wt, orch = build(chosen)
+            loop = asyncio.new_event_loop()
+            d = {"store": store, "orch": orch, "loop": loop, "thread": _start_daemon(loop, orch)}
+            daemons.append(d)
+            while True:
+                d["thread"], switch = _loop(win, chosen, store, orch, loop, log_buf, d["thread"])
+                if not switch:
+                    return
+
+                def dashboard(win, shade, cfg=chosen, d=d) -> None:
+                    _draw(win, cfg, _worklist(d["store"]), 0, "", list(log_buf), 0,
+                          d["thread"].is_alive(), shade=shade)
+
+                # fresh from disk: repos may have been added, and select() changed this one
+                nxt = _choose(win, load(chosen.path, root=chosen.root), chosen.repo.slug, dashboard)
+                win.bkgd(" ", 0)
+                if nxt is not None and nxt.repo.slug != chosen.repo.slug:
+                    break
+                # backed out, or picked the repo that's already open: same dashboard
+            log.info("switching to %s: %s takes no new issues, running agents finish",
+                     nxt.repo.slug, chosen.repo.slug)
+            loop.call_soon_threadsafe(orch.shutdown.set)
+            chosen = nxt
+
     try:
-        thread = curses.wrapper(_loop, cfg, store, orch, loop, log_buf, thread)
-    finally:
-        loop.call_soon_threadsafe(orch.shutdown.set)
-        thread.join(timeout=15)
-        loop.close()
-        store.close()
+        curses.wrapper(session)
+    finally:  # stop every daemon after curses has handed the terminal back
+        for d in daemons:
+            d["loop"].call_soon_threadsafe(d["orch"].shutdown.set)
+        for d in daemons:
+            d["thread"].join(timeout=15)
+            if not d["thread"].is_alive():  # a loop still running an agent can't be closed
+                d["loop"].close()
+                d["store"].close()
     return 0

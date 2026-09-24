@@ -1,8 +1,6 @@
-# Copy to looper.toml and edit. `looper init --repo owner/name` does this for you.
-
-[repo]
-slug = "owner/name"
-base_branch = "main"
+# Settings shared by every repo. `looper init` writes this file and adds one
+# [[repos]] entry per repository at the bottom; run it again to add another.
+# An entry's `model` replaces [agent].model for that repo.
 
 [agent]
 claude_bin = "claude"

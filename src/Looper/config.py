@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -25,6 +27,7 @@ def home() -> Path:
 class RepoCfg:
     slug: str = ""
     base_branch: str = "main"
+    model: str = ""  # empty = [agent].model
 
 
 @dataclass
@@ -77,8 +80,21 @@ class Config:
     loop: LoopCfg = field(default_factory=LoopCfg)
     greptile: GreptileCfg = field(default_factory=GreptileCfg)
     safety: SafetyCfg = field(default_factory=SafetyCfg)
+    repos: list[RepoCfg] = field(default_factory=list)  # every [[repos]] entry
     root: Path = field(default_factory=home)
     path: Path | None = None
+
+    def select(self, slug: str) -> None:
+        """Make `slug` the repo this run works on. Once per loaded config: a repo's
+        model replaces [agent].model."""
+        repo = next((r for r in self.repos if r.slug.lower() == slug.lower()), None)
+        if repo is None:
+            known = ", ".join(r.slug for r in self.repos) or "none yet"
+            raise ConfigError(f"{slug} is not in {self.path}, known repos: {known}. "
+                              f"Add it with `looper init`")
+        self.repo = repo
+        if repo.model:
+            self.agent.model = repo.model
 
     # --- derived ---------------------------------------------------------
     @property
@@ -147,24 +163,54 @@ def load(path: str | Path | None = None, root: Path | None = None) -> Config:
     raw = tomllib.loads(cfg_path.read_text())
 
     cfg = Config(root=root, path=cfg_path)
-    for name in ("repo", "agent", "loop", "greptile", "safety"):
+    if "repo" in raw:
+        raise ConfigError(f"{cfg_path}: [repo] is now [[repos]], one entry per repository. "
+                          "Rename the header, or add repos with `looper init`")
+    entries = raw.get("repos", [])
+    if not isinstance(entries, list):
+        raise ConfigError("repos must be [[repos]] entries")
+    cfg.repos = [_build(RepoCfg, entry, "repos") for entry in entries]
+    for name in ("agent", "loop", "greptile", "safety"):
         if name in raw:
             section = raw[name]
             if not isinstance(section, dict):
                 raise ConfigError(f"[{name}] must be a table")
             cls = type(getattr(cfg, name))
             setattr(cfg, name, _build(cls, section, name))
-    unknown = set(raw) - {"repo", "agent", "loop", "greptile", "safety"}
+    unknown = set(raw) - {"repos", "agent", "loop", "greptile", "safety"}
     if unknown:
         raise ConfigError(f"unknown config sections: {', '.join(sorted(unknown))}")
 
     validate(cfg)
-    return cfg
+    return cfg  # no repo selected yet: that's the command's call (cli._load, the tui picker)
+
+
+_REPO_BLOCK = re.compile(r"^\[\[repos\]\][ \t]*\n(?:[ \t]*\w+[ \t]*=.*(?:\n|$))*", re.M)
+
+
+def upsert_repo(text: str, repo: RepoCfg) -> str:
+    """looper.toml text with `repo`'s [[repos]] entry replaced, or appended if new.
+    Only the entry's own `key = value` lines are touched; comments and every
+    other section stay exactly as they were."""
+    lines = ["[[repos]]", f"slug = {json.dumps(repo.slug)}",
+             f"base_branch = {json.dumps(repo.base_branch)}"]
+    if repo.model:
+        lines.append(f"model = {json.dumps(repo.model)}")
+    block = "\n".join(lines) + "\n"
+    for m in _REPO_BLOCK.finditer(text):
+        slug = tomllib.loads(m.group())["repos"][0].get("slug", "")
+        if slug.lower() == repo.slug.lower():
+            return text[:m.start()] + block + text[m.end():]
+    return text.rstrip("\n") + "\n\n" + block
 
 
 def validate(cfg: Config) -> None:
-    if cfg.repo.slug.count("/") != 1 or not all(cfg.repo.slug.split("/")):
-        raise ConfigError(f"repo.slug must be 'owner/name', got {cfg.repo.slug!r}")
+    for repo in cfg.repos:
+        if repo.slug.count("/") != 1 or not all(repo.slug.split("/")):
+            raise ConfigError(f"[[repos]] slug must be 'owner/name', got {repo.slug!r}")
+    slugs = [r.slug.lower() for r in cfg.repos]
+    if len(slugs) != len(set(slugs)):
+        raise ConfigError("the same repo appears twice in [[repos]]")
     if cfg.agent.permission_mode not in PERMISSION_MODES:
         raise ConfigError(
             f"agent.permission_mode must be one of {sorted(PERMISSION_MODES)}, "
