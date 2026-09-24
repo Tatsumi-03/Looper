@@ -25,7 +25,7 @@ issue ──► claim ──► worktree ──► agent solves ──► push �
 - [`gh`](https://cli.github.com/) authenticated with `repo` scope — Looper does *all*
   GitHub work through it
 - [`claude`](https://claude.com/claude-code) on `PATH` and logged in
-- The Greptile GitHub App installed on the target repo
+- The Greptile GitHub App installed on the target repo (if you dont add it the agent will continously wait for a review)
 
 ## Install
 
@@ -134,9 +134,9 @@ or opening a second PR.
 
 ```
 PENDING → CLAIMED → WORKTREE → SOLVING → PUSHED → PR_OPEN
-        → AWAITING_REVIEW → SCORED ─┬─ 5/5 ─→ READY_FOR_HUMAN ─→ MERGED
-                                    └─ <5 ──→ REVISING → PUSHED → …
-                                                      → PARKED (needs a human)
+        → AWAITING_REVIEW → SCORED ─┬─ 5/5 ─► READY_FOR_HUMAN ─► MERGED
+                                    └─ <5 ──► REVISING → PUSHED → …
+                                                       → PARKED (needs a human)
 ```
 
 `MERGED` is set by the poll loop once a human lands the PR — merging closes the issue,

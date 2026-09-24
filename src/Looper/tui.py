@@ -42,8 +42,21 @@ log = logging.getLogger("looper.tui")
 REFRESH_MS = 2000
 LOG_MAXLINES = 2000
 LOG_MIN_HEIGHT = 5
-HELP = ("j/k move  a start  r retry  e requeue  x abandon  c clean  d transcript  D daemon  "
-        "R repo  PgUp/PgDn log  q quit")
+HELP = "j/k move  a start  d transcript  R repo  ? all keys  q quit"
+KEYS = [  # the ? overlay; keep in step with _loop
+    ("j/k ↑/↓", "move between tasks"),
+    ("a", "start the selected issue now"),
+    ("r", "retry it: back to the queue, error cleared"),
+    ("e", "requeue a parked task, dropping agent:needs-human"),
+    ("x", "abandon it: park it for a human"),
+    ("c", "remove a finished task's worktree"),
+    ("d", "read its agent transcripts in $PAGER"),
+    ("D", "stop or start the daemon"),
+    ("R", "switch repo"),
+    ("PgUp/PgDn", "scroll the log"),
+    ("?", "this list"),
+    ("q  Esc", "quit"),
+]
 HEADER = (f"{'ISSUE':>6}  {'STATE':<16} {'PR':>5}  {'IT':>2} {'SCORE':>5} {'BEST':>4} "
           f"{'COST':>7} {'AGO':>4}  TITLE")
 
@@ -180,6 +193,44 @@ def _blank_backdrop(win, shade: int) -> None:
     win.addnstr(1, 0, HEADER, w - 1, shade)
 
 
+def _window(win, title: str, lines: list[tuple[str, int]], hint: str, backdrop) -> None:
+    """A centred box of (text, attr) lines over `backdrop(win, shade)` drawn darkened:
+    the one look shared by the repo picker and the ? overlay. Lines past the screen
+    are cut; callers that scroll pass only the visible slice."""
+    h, w = win.getmaxyx()
+    shade = _backdrop_attr()
+    win.bkgd(" ", shade)
+    backdrop(win, shade)
+    rows = min(len(lines), h - 3)  # border, lines, blank line, border
+    bw = min(w, max(34, max(len(text) for text, _ in lines) + 6, len(hint) + 4))
+    if rows < 1 or bw < 12:
+        win.addnstr(0, 0, "terminal too small", w - 1)
+        win.refresh()
+        return
+    box = curses.newwin(rows + 3, bw, (h - rows - 3) // 2, (w - bw) // 2)
+    box.box()
+    box.addnstr(0, 2, f" {title} ", bw - 4, curses.A_BOLD)
+    box.addnstr(rows + 2, max(2, bw - len(hint) - 2), hint, bw - 4, curses.A_DIM)
+    for row, (text, attr) in enumerate(lines[:rows]):
+        box.addnstr(1 + row, 2, text, bw - 4, attr)
+    win.noutrefresh()
+    box.noutrefresh()
+    curses.doupdate()
+
+
+def show_keys(win, backdrop) -> None:
+    """The ? overlay: every key, over the dimmed dashboard, until any key is pressed."""
+    width = max(len(keys) for keys, _ in KEYS) + 3
+    lines = [(f"{keys.ljust(width)}{what}", 0) for keys, what in KEYS]
+    win.timeout(-1)
+    while True:
+        _window(win, "keys", lines, " any key closes ", backdrop)
+        if win.getch() != curses.KEY_RESIZE:
+            break
+    win.bkgd(" ", 0)
+    win.timeout(REFRESH_MS)
+
+
 def pick_repo(win, slugs: list[str], selected: int = 0, backdrop=_blank_backdrop) -> str | None:
     """Centred chooser over a darkened screen: a slug, ADD_REPO, or None to quit.
     `backdrop(win, shade)` draws what the picker covers, in `shade`."""
@@ -187,29 +238,15 @@ def pick_repo(win, slugs: list[str], selected: int = 0, backdrop=_blank_backdrop
     selected = min(selected, len(items) - 1)
     win.timeout(-1)  # the backdrop is frozen while the picker is up, so just wait for a key
     while True:
-        h, w = win.getmaxyx()
-        shade = _backdrop_attr()
-        win.bkgd(" ", shade)
-        backdrop(win, shade)
-        rows = min(len(items), h - 3)  # border, items, blank line, border
-        bw = min(w, max(34, max(map(len, items)) + 8, len(PICK_HELP) + 4))
-        if rows < 1 or bw < 12:
-            win.addnstr(0, 0, "terminal too small", w - 1)
-            win.refresh()
-        else:
-            top = max(0, selected - rows + 1)  # scroll once repos outgrow the screen
-            box = curses.newwin(rows + 3, bw, (h - rows - 3) // 2, (w - bw) // 2)
-            box.box()
-            box.addnstr(0, 2, " looper ", bw - 4, curses.A_BOLD)
-            box.addnstr(rows + 2, max(2, bw - len(PICK_HELP) - 2), PICK_HELP, bw - 4, curses.A_DIM)
-            for row, item in enumerate(items[top:top + rows]):
-                on = top + row == selected
-                attr = (_attr("working") | curses.A_BOLD if on
-                        else curses.A_DIM if item == ADD_REPO else 0)
-                box.addnstr(1 + row, 2, ("> " if on else "  ") + item, bw - 4, attr)
-            win.noutrefresh()
-            box.noutrefresh()
-            curses.doupdate()
+        rows = max(1, min(len(items), win.getmaxyx()[0] - 3))
+        top = max(0, selected - rows + 1)  # scroll once repos outgrow the screen
+        lines = []
+        for i, item in enumerate(items[top:top + rows], start=top):
+            on = i == selected
+            attr = (_attr("working") | curses.A_BOLD if on
+                    else curses.A_DIM if item == ADD_REPO else 0)
+            lines.append((("> " if on else "  ") + item, attr))
+        _window(win, "looper", lines, PICK_HELP, backdrop)
         key = win.getch()
         if key in (ord("q"), 27):
             return None
@@ -426,6 +463,9 @@ def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
             return daemon_thread, False
         if key == ord("R"):
             return daemon_thread, True
+        if key == ord("?"):
+            show_keys(win, lambda win, shade: _draw(win, cfg, tasks, selected, "", lines, log_scroll,
+                                                    daemon_thread.is_alive(), shade=shade))
         if key in (curses.KEY_UP, curses.KEY_DOWN, ord("j"), ord("k")):
             selected = navigate(key, len(tasks), selected)
         elif key in (curses.KEY_PPAGE, curses.KEY_NPAGE):
