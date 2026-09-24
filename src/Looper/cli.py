@@ -163,6 +163,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     tomllib.loads(text)  # never write a file the next command can't read
     target.write_text(text)
     print(f"\n{'updated' if known else 'added'} {repo} in {target}: base {base}, model {model}")
+    if not known:  # gh can't see app installs without app auth, so just remind
+        print(f"make sure the Greptile GitHub app is installed on {repo}, "
+              "or no PR will get a review: https://app.greptile.com")
     for label in (cfg.loop if cfg else config_mod.LoopCfg()).only_labels:
         if gh.ensure_label(label):
             print(f'label "{label}" is on {repo}, add it to an issue to queue that issue')
