@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 # Run Looper without installing it.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LOOPER_HOME="${LOOPER_HOME:-$here}"  # config and var/ stay in the checkout, wherever you run from
 PYTHONPATH="$here/src${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m Looper "$@"

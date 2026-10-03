@@ -182,8 +182,13 @@ class Store:
         return [t for t in self.all_tasks() if not t.is_terminal]
 
     def open_pr_count(self) -> int:
-        return sum(1 for t in self.all_tasks() if t.pr_number and t.state != State.PARKED
-                   and t.state != State.READY_FOR_HUMAN)
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE pr_number IS NOT NULL "
+                "AND state NOT IN (?, ?)",
+                (State.PARKED, State.READY_FOR_HUMAN),
+            ).fetchone()
+        return row[0]
 
     def add_cost(self, issue_number: int, usd: float) -> float:
         with self._lock:

@@ -25,7 +25,7 @@ issue ──► claim ──► worktree ──► agent solves ──► push �
 - [`gh`](https://cli.github.com/) authenticated with `repo` scope — Looper does *all*
   GitHub work through it
 - [`claude`](https://claude.com/claude-code) on `PATH` and logged in
-- The Greptile GitHub App installed on the target repo
+- The Greptile GitHub App installed on the target repo (if you dont add it the agent will continously wait for a review)
 
 ## Install
 
@@ -53,6 +53,17 @@ Straight from the checkout, no install:
 ./looper --help
 ```
 
+To run `looper` from any folder, add the checkout to your `PATH`
+(put the line in `~/.bashrc` or `~/.zshrc`):
+
+```bash
+export PATH="$HOME/dev/Looper:$PATH"   # wherever you cloned it
+```
+
+`looper.toml` and `var/` always stay in the checkout, whatever folder you run from.
+Each repo gets its own `var/<owner>__<name>/` (state, logs, worktrees); clones are shared
+in `var/repos/`. Set `LOOPER_HOME` to keep them somewhere else.
+
 Or put a `looper` command on your `PATH` (a venv keeps it off your system Python):
 
 ```bash
@@ -64,9 +75,14 @@ python3 -m venv .venv
 **4. Point it at a repo**
 
 ```bash
-./looper init --repo owner/name        # writes looper.toml
-$EDITOR looper.toml                    # model, budgets, concurrency, skip labels
+./looper init                          # asks for repo, base branch and model
+./looper init                          # again for each more repo you want Looper on
+$EDITOR looper.toml                    # budgets, concurrency, skip labels (shared by all repos)
 ```
+
+Each `init` adds a `[[repos]]` entry to `looper.toml`, or updates it when that repo is
+already there. With more than one repo, `looper tui` opens on a picker, and every other
+command takes `--repo owner/name`.
 
 **5. Check your setup**
 
@@ -97,7 +113,7 @@ missing before anything touches a real repo.
 | command | what it does |
 |---|---|
 | `daemon` | poll open issues and work them continuously |
-| `tui` | the daemon plus a live dashboard: task table, agent controls, scrollable log |
+| `tui [--repo owner/name]` | pick a repo, then the daemon plus a live dashboard: task table, agent controls, scrollable log |
 | `once <issue>` | drive a single issue end to end in the foreground |
 | `status` | table of every task: state, PR, score, cost |
 | `show <issue>` | full detail plus the event log for one issue |
@@ -105,19 +121,22 @@ missing before anything touches a real repo.
 | `abandon <issue> [--clean]` | park a task by hand |
 | `clean [--all]` | delete worktrees of finished tasks |
 | `doctor` | verify config, tooling and GitHub access |
-| `init --repo owner/name` | write a starter `looper.toml` |
+| `init [--repo owner/name] [--base-branch b] [--model m]` | add a repo (or update it): ask for the repo, base branch and model, checked against GitHub; create the `agent` label; run `doctor` |
+
+Every command except `init` also takes `--repo owner/name`, needed once `looper.toml` has
+more than one repo.
 
 ## How it works
 
-**State lives in SQLite** (`var/looper.db`), not in memory. Every transition is recorded,
+**State lives in SQLite** (`var/<owner>__<name>/looper.db`, one per repo), not in memory. Every transition is recorded,
 so a daemon restart resumes each task from where it stopped instead of re-solving the issue
 or opening a second PR.
 
 ```
 PENDING → CLAIMED → WORKTREE → SOLVING → PUSHED → PR_OPEN
-        → AWAITING_REVIEW → SCORED ─┬─ 5/5 ─→ READY_FOR_HUMAN ─→ MERGED
-                                    └─ <5 ──→ REVISING → PUSHED → …
-                                                      → PARKED (needs a human)
+        → AWAITING_REVIEW → SCORED ─┬─ 5/5 ─► READY_FOR_HUMAN ─► MERGED
+                                    └─ <5 ──► REVISING → PUSHED → …
+                                                       → PARKED (needs a human)
 ```
 
 `MERGED` is set by the poll loop once a human lands the PR — merging closes the issue,
@@ -177,7 +196,7 @@ See `src/Looper/looper.toml.example` for every option. The ones worth knowing:
 - the agent's tool allowlist excludes `gh`, `git push`, `git remote`, `sudo`, `rm -rf`
 - `--permission-prompts none`: an unexpected tool call is denied, not left hanging
 - per-run and per-issue dollar ceilings
-- one daemon per checkout (`var/daemon.lock`), one worker per issue (`var/locks/`)
+- one daemon per repo (`var/<owner>__<name>/daemon.lock`), one worker per issue (`…/locks/`)
 - `dry_run` and `--fake-review` let you rehearse the whole loop before it can touch anything
 
 OS-level sandboxing (Claude Code's `--sandbox`, via bubblewrap on Linux) is a planned
@@ -200,7 +219,7 @@ src/Looper/
 var/               db, logs, worktrees, clones  (gitignored)
 ```
 
-Agent transcripts land in `var/logs/issue-<n>/` — the prompt, the full `stream-json`
+Agent transcripts land in `var/<owner>__<name>/logs/issue-<n>/` — the prompt, the full `stream-json`
 transcript, and the review text for every round.
 
 ## TUI

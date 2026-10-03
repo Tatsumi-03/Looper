@@ -121,15 +121,18 @@ class GH:
                 raise
             log.debug("remove %s label ignored: %s", kind, exc)
 
-    def ensure_label(self, label: str, color: str = "5319e7") -> None:
+    def ensure_label(self, label: str, color: str = "5319e7") -> bool:
+        """True once the label exists on the repo (created now or already there)."""
         if self.dry_run:
-            return
+            return True
         try:
             self._run(["label", "create", label, "--repo", self.slug, "--color", color,
-                       "--description", "managed by BarebonesHarness"])
+                       "--description", "managed by Looper"])
         except GHError as exc:
             if "already exists" not in exc.stderr.lower():
                 log.debug("ensure_label(%s): %s", label, exc)
+                return False
+        return True
 
     # --- pull requests ---------------------------------------------------
     def create_pr(self, *, head: str, base: str, title: str, body: str) -> int | None:

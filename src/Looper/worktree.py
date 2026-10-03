@@ -115,7 +115,7 @@ class Worktrees:
                  cwd=self.base)
         if not _git(["config", "user.email"], cwd=self.base, check=False).stdout.strip():
             _git(["config", "user.email", "looper@local"], cwd=self.base)
-            _git(["config", "user.name", "BarebonesHarness"], cwd=self.base)
+            _git(["config", "user.name", "Looper"], cwd=self.base)
         return self.base
 
     def fetch(self) -> None:
