@@ -35,7 +35,7 @@ Looper itself pulls in nothing else.
 **1. Clone it**
 
 ```bash
-git clone https://github.com/<you>/Looper.git
+git clone https://github.com/Tatsumi-03/Looper.git
 cd Looper
 ```
 
@@ -249,3 +249,7 @@ python -m venv .venv && .venv/bin/pip install pytest
 
 `tests/test_flow.py` runs the whole state machine against real git worktrees and a real
 local origin, with GitHub and Claude stubbed out — no network, no API spend.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
