@@ -218,3 +218,38 @@ def test_transcript_renders_runs_in_order(tmp_path):
         "── error_max_turns: 0 turns, $0.00",
     ]
     assert transcript(tmp_path / "missing") == ""   # task that never ran an agent
+
+
+def test_switch_provider_swaps_agents_and_saves_choice(tmp_path):
+    import sys
+    from types import SimpleNamespace
+
+    from Looper.agent import ClaudeAgent, CodexAgent
+    from Looper.config import load, set_provider
+    from Looper.tui import switch_provider
+
+    path = tmp_path / "looper.toml"
+    path.write_text('[agent]\nprovider = "claude"   # or codex\nmodel = "opus"\n\n[loop]\nreviewer = "claude"\n')
+    cfg = load(path, root=tmp_path)
+    cfg.agent.claude_bin = cfg.agent.codex_bin = sys.executable  # both "installed"
+    orch = SimpleNamespace(agent=None, reviewer=None)
+
+    assert "codex" in switch_provider(cfg, orch)
+    assert isinstance(orch.agent, CodexAgent) and not orch.agent.read_only
+    assert isinstance(orch.reviewer, CodexAgent) and orch.reviewer.read_only
+    assert path.read_text().startswith('[agent]\nprovider = "codex"   # or codex\nmodel = "opus"\n')
+    assert load(path, root=tmp_path).agent.provider == "codex"
+
+    switch_provider(cfg, orch)
+    assert isinstance(orch.agent, ClaudeAgent) and orch.agent.cfg.model == "opus"
+    assert load(path, root=tmp_path).agent.provider == "claude"
+
+    cfg.agent.codex_bin = str(tmp_path / "no-such-codex")
+    assert "not on PATH" in switch_provider(cfg, orch)
+    assert cfg.agent.provider == "claude" and isinstance(orch.agent, ClaudeAgent)
+
+    # older configs have no provider line, or no [agent] at all
+    assert set_provider('[agent]\nmodel = "opus"\n[loop]\n', "codex") == \
+        '[agent]\nprovider = "codex"\nmodel = "opus"\n[loop]\n'
+    assert set_provider('[loop]\nreviewer = "claude"\n', "codex") == \
+        '[loop]\nreviewer = "claude"\n\n[agent]\nprovider = "codex"\n'

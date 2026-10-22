@@ -49,7 +49,7 @@ class ReviewResult:
     inline: list[InlineComment] = field(default_factory=list)
 
     def render(self) -> str:
-        parts = [f"## Greptile review — confidence score {self.score}/5", self.summary.strip()]
+        parts = [f"## Code review — confidence score {self.score}/5", self.summary.strip()]
         if self.inline:
             parts.append(f"## Inline findings ({len(self.inline)})")
             parts.extend(c.render() for c in self.inline)
@@ -147,7 +147,7 @@ def find_review(gh: GH, pr: int, cfg: GreptileCfg, *, head_sha: str | None,
 def fake_review(score: int) -> ReviewResult:
     return ReviewResult(
         score=score,
-        summary=f"[fake review] Confidence score: {score}/5 — injected by greptile.fake_scores.",
+        summary=f"[fake review] Confidence score: {score}/5 — injected by loop.fake_scores.",
         updated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
         source="fake",
     )

@@ -1,4 +1,4 @@
-"""The loop: issue -> worktree -> agent -> PR -> Greptile -> revise -> 5/5."""
+"""The loop: issue -> worktree -> agent -> PR -> review -> revise -> 5/5."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import ci, greptile
-from .agent import ClaudeAgent, RunResult
+from .agent import ClaudeAgent, CodexAgent, RunResult, make_agent
 from .config import Config
 from .gh import GH, GHError
 from .greptile import ReviewResult
@@ -92,17 +92,18 @@ def check_merged(gh: GH, store: Store) -> int:
 
 
 class Orchestrator:
-    def __init__(self, cfg: Config, store: Store, gh: GH, wt: Worktrees, agent: ClaudeAgent):
+    def __init__(self, cfg: Config, store: Store, gh: GH, wt: Worktrees,
+                 agent: ClaudeAgent | CodexAgent, reviewer: ClaudeAgent | CodexAgent | None = None):
         self.cfg = cfg
         self.store = store
         self.gh = gh
         self.wt = wt
         self.agent = agent
+        # loop.reviewer = "claude": the built-in reviewer, on whichever provider the solver uses
+        self.reviewer = reviewer or make_agent(cfg.agent, dry_run=cfg.safety.dry_run, review=True)
         self.shutdown = asyncio.Event()
         self._sem = asyncio.Semaphore(cfg.loop.max_concurrent_agents)
         self._running: dict[int, asyncio.Task[Any]] = {}
-        # per-issue, because several issues are driven concurrently
-        self._pending_pr_body: dict[int, str] = {}
 
     # ------------------------------------------------------------------ #
     # entry points
@@ -117,9 +118,9 @@ class Orchestrator:
         await asyncio.to_thread(self.gh.preflight)
         if install_signals:
             self._install_signals()
-        log.info("daemon up: repo=%s concurrency=%d target=%d/5 dry_run=%s",
-                 self.cfg.repo.slug, self.cfg.loop.max_concurrent_agents,
-                 self.cfg.greptile.target_score, self.cfg.safety.dry_run)
+        log.info("daemon up: repo=%s concurrency=%d reviewer=%s target=%d/5 dry_run=%s",
+                 self.cfg.repo.slug, self.cfg.loop.max_concurrent_agents, self.cfg.loop.reviewer,
+                 self.cfg.loop.target_score, self.cfg.safety.dry_run)
 
         for task in self.store.unfinished():
             log.info("resuming #%s from %s", task.issue_number, task.state)
@@ -244,7 +245,7 @@ class Orchestrator:
             if task.pr_number is None:
                 task = await self._solve(task, issue, path)
                 task = await self._push_and_open_pr(task, issue, path)
-            return await self._review_loop(task, path)
+            return await self._review_loop(task, issue, path)
         except Parked as exc:
             return self._park(issue_number, str(exc))
         except (GHError, GitError) as exc:
@@ -256,7 +257,7 @@ class Orchestrator:
             return task
         body = (f"{MARKER}\n🤖 **Looper** picked this up. An agent is working on it in "
                 f"`{self.wt.branch_for(task.issue_number)}`; a PR will follow and will be revised "
-                f"until Greptile scores it {self.cfg.greptile.target_score}/5.")
+                f"until review scores it {self.cfg.loop.target_score}/5.")
         await asyncio.to_thread(self.gh.add_label, task.issue_number, LABEL_IN_PROGRESS)
         await asyncio.to_thread(self.gh.comment, task.issue_number, body)
         return self.store.set_state(task.issue_number, State.CLAIMED, "claimed issue")
@@ -293,16 +294,10 @@ class Orchestrator:
             ISSUE_TITLE=issue.get("title", ""),
             ISSUE_BODY=issue.get("body") or "(no description)",
             ISSUE_COMMENTS=self._format_issue_comments(issue),
-            TARGET_SCORE=self.cfg.greptile.target_score,
+            TARGET_SCORE=self.cfg.loop.target_score,
         )
         before = await asyncio.to_thread(self.wt.head_sha, path)
         result = await self._run_agent(task, "solve", prompt, path, session_id, resume=resume)
-        if not result.ok and self._is_session_error(result.error):
-            log.warning("#%s: session %s unusable (%s) — starting a fresh one",
-                        task.issue_number, session_id, result.error)
-            session_id = str(uuid.uuid4())
-            self.store.update(task.issue_number, session_id=session_id)
-            result = await self._run_agent(task, "solve", prompt, path, session_id, resume=False)
 
         if ABORT_TOKEN in result.result_text:
             reason = result.result_text.split(ABORT_TOKEN, 1)[1].strip().splitlines()[0]
@@ -324,7 +319,7 @@ class Orchestrator:
     @staticmethod
     def _is_session_error(error: str | None) -> bool:
         low = (error or "").lower()
-        return "session id" in low or "no conversation found" in low
+        return "session id" in low or "no conversation found" in low or "no rollout found" in low
 
     @staticmethod
     def _extract_pr_body(result_text: str) -> str | None:
@@ -337,8 +332,8 @@ class Orchestrator:
         if agent_body:
             parts += [agent_body, ""]
         parts += [MARKER,
-                  f"<sub>Opened by Looper; an agent revises this branch until Greptile "
-                  f"scores it {self.cfg.greptile.target_score}/5.</sub>",
+                  f"<sub>Opened by Looper; an agent revises this branch until review "
+                  f"scores it {self.cfg.loop.target_score}/5.</sub>",
                   "", f"<details><summary>diffstat</summary>\n\n```\n{stat}\n```\n\n</details>"]
         return "\n".join(parts)
 
@@ -349,8 +344,7 @@ class Orchestrator:
                                     head_sha=head, pushed_at=now())
 
         stat = await asyncio.to_thread(self.wt.diff_stat, path)
-        body = self._compose_pr_body(task.issue_number,
-                                     self._pending_pr_body.pop(task.issue_number, None), stat)
+        body = self._compose_pr_body(task.issue_number, task.pending_pr_body, stat)
         existing = await asyncio.to_thread(self.gh.find_pr_for_branch, branch)
         if existing and existing.get("state") == "OPEN":
             pr_number = existing["number"]
@@ -363,35 +357,32 @@ class Orchestrator:
         if pr_number is None:  # dry run
             raise Parked("dry-run: stopped before opening a PR")
         return self.store.set_state(task.issue_number, State.PR_OPEN, f"opened PR #{pr_number}",
-                                    pr_number=pr_number)
+                                    pr_number=pr_number, pending_pr_body=None)
 
-    async def _review_loop(self, task: Task, path: Path) -> Task:
+    async def _review_loop(self, task: Task, issue: dict[str, Any], path: Path) -> Task:
         cfg = self.cfg
         while True:
             task = self.store.get(task.issue_number)  # type: ignore[assignment]
             if task.pr_number is None:
                 raise Parked("no PR to review")
             self.store.set_state(task.issue_number, State.AWAITING_REVIEW,
-                                 f"waiting for Greptile on {(task.head_sha or '')[:7]}")
-            log.info("#%s: PR #%s pushed at %s — waiting for Greptile (poll %ss, timeout %sm)",
-                     task.issue_number, task.pr_number, (task.head_sha or "")[:7],
-                     self.cfg.greptile.poll_interval_sec, self.cfg.greptile.review_timeout_sec // 60)
-            review = await self._get_review(task)
+                                 f"waiting for {cfg.loop.reviewer} review on {(task.head_sha or '')[:7]}")
+            review = await self._get_review(task, issue, path)
             if review is None or review.score is None:
-                raise Parked("Greptile never returned a score for this head")
+                raise Parked(f"{cfg.loop.reviewer} never returned a score for this head")
 
             task = self.store.record_score(task.issue_number, review.score)
             self.store.set_state(task.issue_number, State.SCORED,
                                  f"score {review.score}/5 (round {task.iteration + 1})")
             self._write_review_log(task, review)
 
-            if review.score >= cfg.greptile.target_score:
+            if review.score >= cfg.loop.target_score:
                 view = await self._wait_for_ci(task)
                 _, failing = ci.verdict(view.get("statusCheckRollup") or [])
                 if view.get("mergeable") == "CONFLICTING":
                     why = "merge conflict"
                     base = cfg.repo.base_branch
-                    headline = (f"Greptile scored the pull request you opened for issue "
+                    headline = (f"The reviewer scored the pull request you opened for issue "
                                 f"#{task.issue_number} **{review.score}/5**, but it now conflicts "
                                 f"with `{base}` and cannot be merged.")
                     feedback = (f"## Merge conflict with {base}\n\n"
@@ -403,15 +394,15 @@ class Orchestrator:
                     return self._succeed(task, review)
                 else:
                     why = "CI failing"
-                    headline = (f"Greptile scored the pull request you opened for issue "
+                    headline = (f"The reviewer scored the pull request you opened for issue "
                                 f"#{task.issue_number} **{review.score}/5**, but its CI checks are "
                                 f"failing. A human will not merge a red PR — make CI pass.")
                     feedback = await asyncio.to_thread(ci.render, self.gh, failing, task.head_sha)
             else:
                 why = f"{review.score}/5"
                 headline = (f"The pull request you opened for issue #{task.issue_number} has been "
-                            f"reviewed by Greptile, an AI code reviewer. It scored "
-                            f"**{review.score}/5** — we need **{cfg.greptile.target_score}/5** "
+                            f"reviewed by an AI code reviewer. It scored "
+                            f"**{review.score}/5** — we need **{cfg.loop.target_score}/5** "
                             f"before a human will merge it.")
                 feedback = review.render()
 
@@ -425,13 +416,20 @@ class Orchestrator:
             await self._revise(task, path, why, headline, feedback)
             task = self.store.get(task.issue_number)  # type: ignore[assignment]
 
-    async def _get_review(self, task: Task) -> ReviewResult | None:
-        fakes = self.cfg.greptile.fake_scores
+    async def _get_review(self, task: Task, issue: dict[str, Any],
+                          path: Path) -> ReviewResult | None:
+        fakes = self.cfg.loop.fake_scores
         if fakes:
             score = fakes[min(task.iteration, len(fakes) - 1)]
             log.info("#%s: injecting fake score %s/5", task.issue_number, score)
             await asyncio.sleep(0)
             return greptile.fake_review(score)
+        if self.cfg.loop.reviewer == "claude":
+            return await self._claude_review(task, issue, path)
+
+        log.info("#%s: PR #%s pushed at %s — waiting for Greptile (poll %ss, timeout %sm)",
+                 task.issue_number, task.pr_number, (task.head_sha or "")[:7],
+                 self.cfg.greptile.poll_interval_sec, self.cfg.greptile.review_timeout_sec // 60)
 
         def bump(count: int) -> None:
             self.store.update(task.issue_number, retriggers=count)
@@ -441,6 +439,29 @@ class Orchestrator:
             head_sha=task.head_sha, pushed_at=task.pushed_at,
             retriggers_used=task.retriggers, on_retrigger=bump,
         )
+
+    async def _claude_review(self, task: Task, issue: dict[str, Any], path: Path) -> ReviewResult:
+        """Greptile's job without Greptile: a fresh session reads the diff and scores it.
+        Fresh each round, so it never grades work it remembers writing."""
+        prompt = render(
+            "review_pr.md",
+            REPO=self.cfg.repo.slug,
+            BASE_BRANCH=self.cfg.repo.base_branch,
+            ISSUE_NUMBER=task.issue_number,
+            ISSUE_TITLE=issue.get("title", ""),
+            ISSUE_BODY=issue.get("body") or "(no description)",
+            TARGET_SCORE=self.cfg.loop.target_score,
+        )
+        result = await self._run_agent(task, "review", prompt, path, None, resume=False,
+                                       review=True)
+        text = result.result_text.strip()
+        review = ReviewResult(score=greptile.parse_score(text), summary=text,
+                              updated_at=now(), source="claude")
+        if review.score is not None and task.pr_number:
+            # the human who merges should see why it passed, as they would Greptile's comment
+            await asyncio.to_thread(self.gh.pr_comment, task.pr_number,
+                                    f"{MARKER}\n{review.render()}")
+        return review
 
     async def _wait_for_ci(self, task: Task) -> dict[str, Any]:
         """The PR view once CI on the current head settles. Parks if it never does."""
@@ -487,7 +508,7 @@ class Orchestrator:
 
         branch = self.wt.branch_for(task.issue_number)
         head = await asyncio.to_thread(self.wt.push, path, branch)
-        agent_body = self._pending_pr_body.pop(task.issue_number, None)
+        agent_body = self.store.get(task.issue_number).pending_pr_body  # type: ignore[union-attr]
         if agent_body and task.pr_number:
             stat = await asyncio.to_thread(self.wt.diff_stat, path)
             await asyncio.to_thread(self.gh.edit_pr_body, task.pr_number,
@@ -495,13 +516,13 @@ class Orchestrator:
             self.store.event(task.issue_number, "updated PR description from agent")
         return self.store.set_state(task.issue_number, State.PUSHED,
                                     f"pushed revision {head[:7]}",
-                                    head_sha=head, pushed_at=now())
+                                    head_sha=head, pushed_at=now(), pending_pr_body=None)
 
     # --- terminal states -------------------------------------------------
     def _succeed(self, task: Task, review: ReviewResult) -> Task:
         n, pr = task.issue_number, task.pr_number
         rounds = task.iteration + 1
-        body = (f"{MARKER}\n✅ Greptile scored this **{review.score}/5** after {rounds} review "
+        body = (f"{MARKER}\n✅ {self.cfg.loop.reviewer.capitalize()} scored this **{review.score}/5** after {rounds} review "
                 f"round(s). Total agent spend: ${task.cost_usd:.2f}. Ready for a human to merge.")
         try:
             if pr:
@@ -521,7 +542,7 @@ class Orchestrator:
         log.warning("#%s PARKED: %s", issue_number, reason)
         body = (f"{MARKER}\n🅿️ **Looper parked this task** — a human needs to take over.\n\n"
                 f"**Reason:** {reason}\n"
-                f"**Best Greptile score:** {task.best_score if task else '—'}/5\n"
+                f"**Best review score:** {task.best_score if task else '—'}/5\n"
                 f"**Review rounds:** {task.iteration if task else 0}\n"
                 f"**Agent spend:** ${task.cost_usd if task else 0:.2f}\n\n"
                 f"The branch and worktree are left intact for inspection.")
@@ -539,25 +560,37 @@ class Orchestrator:
 
     # --- helpers ---------------------------------------------------------
     async def _run_agent(self, task: Task, kind: str, prompt: str, path: Path,
-                         session_id: str | None, *, resume: bool) -> RunResult:
+                         session_id: str | None, *, resume: bool,
+                         review: bool = False) -> RunResult:
+        # read per run: the tui can swap the provider while the daemon runs
+        agent = self.reviewer if review else self.agent
         log_dir = self.cfg.logs_dir / f"issue-{task.issue_number}"
         log_path = log_dir / f"{task.iteration:02d}-{kind}.jsonl"
         (log_dir / f"{task.iteration:02d}-{kind}.prompt.md").parent.mkdir(parents=True, exist_ok=True)
         (log_dir / f"{task.iteration:02d}-{kind}.prompt.md").write_text(prompt)
 
-        attempt = self.store.start_attempt(task.issue_number, task.iteration, kind, session_id)
-        result = await self.agent.run(prompt, cwd=path, log_path=log_path,
-                                      session_id=session_id, resume=resume)
-        self.store.finish_attempt(
-            attempt, ok=result.ok, num_turns=result.num_turns, cost_usd=result.cost_usd,
-            result_text=result.result_text[:4000], log_path=str(log_path),
-            session_id=result.session_id,
-        )
-        if body := self._extract_pr_body(result.result_text):
-            self._pending_pr_body[task.issue_number] = body
+        for fresh in (False, True):
+            attempt = self.store.start_attempt(task.issue_number, task.iteration, kind, session_id)
+            result = await agent.run(prompt, cwd=path, log_path=log_path,
+                                     session_id=session_id, resume=resume)
+            self.store.finish_attempt(
+                attempt, ok=result.ok, num_turns=result.num_turns, cost_usd=result.cost_usd,
+                result_text=result.result_text[:4000], log_path=str(log_path),
+                session_id=result.session_id,
+            )
+            # a crashed solve, or a session the other provider started (the tui switches them)
+            if fresh or result.ok or not self._is_session_error(result.error):
+                break
+            log.warning("#%s: session %s unusable (%s) — starting a fresh one",
+                        task.issue_number, session_id, result.error)
+            session_id, resume = str(uuid.uuid4()), False
+            self.store.update(task.issue_number, session_id=session_id)
         total = self.store.add_cost(task.issue_number, result.cost_usd)
-        if result.session_id and result.session_id != task.session_id:
-            self.store.update(task.issue_number, session_id=result.session_id)
+        if not review:  # a review session is throwaway: not the solver's session or PR body
+            if body := self._extract_pr_body(result.result_text):
+                self.store.update(task.issue_number, pending_pr_body=body)
+            if result.session_id and result.session_id != task.session_id:
+                self.store.update(task.issue_number, session_id=result.session_id)
         self.store.event(task.issue_number, f"agent {kind}: {result.summary}",
                          data={"cost_total": total, "log": str(log_path)})
         log.info("#%s agent %s: %s (total $%.2f)", task.issue_number, kind, result.summary, total)
@@ -567,7 +600,7 @@ class Orchestrator:
         log_dir = self.cfg.logs_dir / f"issue-{task.issue_number}"
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / f"{task.iteration:02d}-review.md").write_text(review.render())
-        self.store.event(task.issue_number, f"greptile {review.score}/5",
+        self.store.event(task.issue_number, f"review {review.score}/5",
                          data={"source": review.source, "url": review.url,
                                "inline": len(review.inline)})
 

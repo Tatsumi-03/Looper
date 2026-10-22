@@ -1,7 +1,7 @@
 [project]
 name = "looper"
 version = "0.1.0"
-description = "Loop-engineering TUI: drives Claude Code agents from GitHub issue to a Greptile-approved PR"
+description = "Loop-engineering TUI: drives Claude Code or Codex agents from GitHub issue to a review-approved PR"
 requires-python = ">=3.11"
 dependencies = []
 
