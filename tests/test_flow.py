@@ -117,8 +117,9 @@ def make(tmp_path, origin, *, scores, max_iterations=5):
     cfg = Config(
         repo=RepoCfg(slug="acme/widget", base_branch="main"),
         agent=AgentCfg(model="sonnet"),
-        loop=LoopCfg(max_concurrent_agents=1, max_iterations=max_iterations, max_open_prs=5),
-        greptile=GreptileCfg(fake_scores=scores, target_score=5, poll_interval_sec=0),
+        loop=LoopCfg(max_concurrent_agents=1, max_iterations=max_iterations, max_open_prs=5,
+                     fake_scores=scores, target_score=5),
+        greptile=GreptileCfg(poll_interval_sec=0),
         safety=SafetyCfg(branch_prefix="agent/issue-"),
         root=tmp_path / "work",
     )
@@ -145,7 +146,7 @@ def test_happy_path_iterates_until_target_score(tmp_path, origin):
 
     # one solve + one revise, the revise resumed the same session
     assert [r["resume"] for r in agent.runs] == [False, True]
-    assert "Greptile review" in agent.runs[1]["prompt"]
+    assert "Code review" in agent.runs[1]["prompt"]
 
     # the branch really exists on the fake origin, with both commits
     out = subprocess.run(["git", "log", "--oneline", "agent/issue-42"], cwd=origin,
@@ -191,7 +192,7 @@ def test_restart_resumes_after_pr_without_resolving_again(tmp_path, origin):
 
     # now reopen the review loop as if the daemon died mid-flight
     store.set_state(42, State.AWAITING_REVIEW, "simulated crash", error=None)
-    cfg.greptile.fake_scores = [5]
+    cfg.loop.fake_scores = [5]
     third = FakeAgent()
     task = asyncio.run(Orchestrator(cfg, store, gh, wt, third).drive(42))
     assert task.state == State.READY_FOR_HUMAN
@@ -225,15 +226,53 @@ def test_agent_writes_the_pr_description(tmp_path, origin):
         "the revision round must rewrite the description"
 
 
-def test_pending_pr_body_does_not_leak_between_issues(tmp_path, origin):
-    cfg, store, gh, wt = make(tmp_path, origin, scores=[5])
-    orch = Orchestrator(cfg, store, gh, wt, FakeAgent())
-    assert orch._extract_pr_body("blah <pr-description>\nhi\n</pr-description> tail") == "hi"
-    assert orch._extract_pr_body("no block here") is None
+def test_extract_pr_body():
+    assert Orchestrator._extract_pr_body("blah <pr-description>\nhi\n</pr-description> tail") == "hi"
+    assert Orchestrator._extract_pr_body("no block here") is None
 
-    orch._pending_pr_body[1] = "body for 1"
-    assert orch._pending_pr_body.pop(2, None) is None
-    assert orch._pending_pr_body[1] == "body for 1"
+
+def test_pr_description_survives_a_restart(tmp_path, origin):
+    """The daemon died after the agent wrote its description; the resumed run sends none."""
+    cfg, store, gh, wt = make(tmp_path, origin, scores=[5])
+    store.create(42, "half-done")
+    store.update(42, pending_pr_body="## Written before the crash")
+
+    task = asyncio.run(Orchestrator(cfg, store, gh, wt, FakeAgent()).drive(42))
+
+    assert "## Written before the crash" in gh.prs[101]["body"]
+    assert task.pending_pr_body is None, "once on the PR it must not be applied again"
+
+
+class FakeReviewer:
+    """The built-in reviewer: a fresh session that only answers with a review."""
+
+    def __init__(self, *replies):
+        self.replies, self.runs = list(replies), []
+
+    async def run(self, prompt, *, cwd, log_path, session_id=None, resume=False):
+        self.runs.append({"prompt": prompt, "session_id": session_id, "resume": resume})
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("{}\n")
+        return RunResult(True, "reviewer-session", 0.1, 2, self.replies.pop(0), "success",
+                         None, log_path, 1.0)
+
+
+def test_claude_reviewer_drives_the_loop_without_greptile(tmp_path, origin):
+    cfg, store, gh, wt = make(tmp_path, origin, scores=[])
+    agent = FakeAgent()
+    reviewer = FakeReviewer("fix.txt:1 drops the null case, handle it.\n\nConfidence score: 3/5",
+                            "No findings.\n\nConfidence score: 5/5")
+
+    task = asyncio.run(Orchestrator(cfg, store, gh, wt, agent, reviewer).drive(42))
+
+    assert task.state == State.READY_FOR_HUMAN and task.iteration == 1
+    assert "Fix thing 42" in reviewer.runs[0]["prompt"], "the reviewer judges against the issue"
+    assert [r["resume"] for r in reviewer.runs] == [False, False], "a fresh review every round"
+    assert "drops the null case" in agent.runs[1]["prompt"]
+    assert task.session_id != "reviewer-session", "the solver keeps its own session"
+    assert task.cost_usd == pytest.approx(0.25 * 2 + 0.1 * 2)
+    assert any(n == 101 and "Confidence score: 3/5" in body for n, body in gh.comments), \
+        "the review is posted on the PR"
 
 
 def test_concurrent_worktrees_do_not_race_on_the_shared_clone(tmp_path, origin):

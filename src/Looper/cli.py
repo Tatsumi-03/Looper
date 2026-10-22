@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from . import config as config_mod
-from .agent import ClaudeAgent
+from .agent import make_agent
 from .config import Config, ConfigError
 from .gh import GH, GHError
 from .orchestrator import Orchestrator
@@ -59,7 +59,7 @@ def build(cfg: Config) -> tuple[Store, GH, Worktrees, Orchestrator]:
         branch_prefix=cfg.safety.branch_prefix,
         dry_run=cfg.safety.dry_run,
     )
-    agent = ClaudeAgent(cfg.agent, dry_run=cfg.safety.dry_run)
+    agent = make_agent(cfg.agent, dry_run=cfg.safety.dry_run)
     return store, gh, wt, Orchestrator(cfg, store, gh, wt, agent)
 
 
@@ -163,10 +163,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     tomllib.loads(text)  # never write a file the next command can't read
     target.write_text(text)
     print(f"\n{'updated' if known else 'added'} {repo} in {target}: base {base}, model {model}")
-    if not known:  # gh can't see app installs without app auth, so just remind
+    loop_cfg = cfg.loop if cfg else config_mod.LoopCfg()
+    if not known and loop_cfg.reviewer == "greptile":  # gh can't see app installs without app auth
         print(f"make sure the Greptile GitHub app is installed on {repo}, "
               "or no PR will get a review: https://app.greptile.com")
-    for label in (cfg.loop if cfg else config_mod.LoopCfg()).only_labels:
+    for label in loop_cfg.only_labels:
         if gh.ensure_label(label):
             print(f'label "{label}" is on {repo}, add it to an issue to queue that issue')
         else:
@@ -315,8 +316,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         print(f"config    FAIL {exc}")
         return 1
+    agent_bin = cfg.agent.codex_bin if cfg.agent.provider == "codex" else cfg.agent.claude_bin
     for name, path in (("gh", shutil.which("gh")), ("git", shutil.which("git")),
-                       ("claude", shutil.which(cfg.agent.claude_bin))):
+                       (cfg.agent.provider, shutil.which(agent_bin))):
         print(f"{name:<9} {'ok  ' if path else 'FAIL'} {path or 'not found on PATH'}")
         ok &= bool(path)
     gh = GH(cfg.repo.slug)
@@ -328,8 +330,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ok = False
     if cfg.safety.dry_run:
         print("safety    note dry_run is ON — nothing will be pushed or posted")
-    if cfg.greptile.fake_scores:
-        print(f"safety    note fake_scores={cfg.greptile.fake_scores} — Greptile will not be consulted")
+    print(f"review    ok   {cfg.loop.reviewer}" + (
+        " (needs the Greptile GitHub app on the repo)" if cfg.loop.reviewer == "greptile" else ""))
+    if cfg.loop.fake_scores:
+        print(f"safety    note fake_scores={cfg.loop.fake_scores} — no reviewer will be consulted")
     return 0 if ok else 1
 
 
@@ -351,7 +355,7 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
     if getattr(args, "dry_run", False):
         cfg.safety.dry_run = True
     if getattr(args, "fake_review", None):
-        cfg.greptile.fake_scores = [int(s) for s in args.fake_review.split(",")]
+        cfg.loop.fake_scores = [int(s) for s in args.fake_review.split(",")]
     if getattr(args, "concurrency", None):
         cfg.loop.max_concurrent_agents = args.concurrency
     if getattr(args, "model", None):
@@ -362,13 +366,13 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         "looper",
-        description="Drive Claude Code agents from GitHub issue to a Greptile-approved PR.",
+        description="Drive Claude Code agents from GitHub issue to a review-approved PR.",
         epilog=("examples:\n"
                 "  looper doctor                 check config, gh, git and claude\n"
                 "  looper once 12                work one issue, start to finish\n"
                 "  looper once 12 --dry-run      rehearse: no push, no PR, no comments\n"
                 "  looper once 12 --fake-review 3,4,5\n"
-                "                                 exercise the revise loop without Greptile\n"
+                "                                 exercise the revise loop without a reviewer\n"
                 "  looper daemon                 work every open issue, continuously\n"
                 "  looper status                 what every task is doing\n"
                 "  looper show 12                event log and spend for one issue"),

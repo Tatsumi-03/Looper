@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     retriggers   INTEGER NOT NULL DEFAULT 0,
     cost_usd     REAL NOT NULL DEFAULT 0,
     error        TEXT,
+    pending_pr_body TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -81,7 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_attempts_issue ON attempts(issue_number, id);
 
 TASK_COLUMNS = (
     "issue_number title state branch pr_number head_sha pushed_at session_id iteration "
-    "last_score best_score retriggers cost_usd error created_at updated_at"
+    "last_score best_score retriggers cost_usd error pending_pr_body created_at updated_at"
 ).split()
 
 
@@ -105,6 +106,8 @@ class Task:
     retriggers: int = 0
     cost_usd: float = 0.0
     error: str | None = None
+    #: the agent's latest <pr-description>, kept until it is on the PR so a restart can't lose it
+    pending_pr_body: str | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -124,6 +127,9 @@ class Store:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=NORMAL")
             self._db.executescript(SCHEMA)
+            columns = {r["name"] for r in self._db.execute("PRAGMA table_info(tasks)")}
+            if "pending_pr_body" not in columns:  # a db made before the column existed
+                self._db.execute("ALTER TABLE tasks ADD COLUMN pending_pr_body TEXT")
             self._db.commit()
 
     def close(self) -> None:

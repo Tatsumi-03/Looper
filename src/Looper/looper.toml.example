@@ -3,11 +3,17 @@
 # An entry's `model` replaces [agent].model for that repo.
 
 [agent]
+provider = "claude"           # "codex": run Codex through `codex app-server` on your ChatGPT plan
+                              # (`p` in the tui switches it)
 claude_bin = "claude"
+codex_bin = "codex"
 model = "sonnet"
-max_turns = 60
-max_budget_usd = 5.0          # ceiling for a single claude run
+codex_model = ""              # empty = codex's default
+max_turns = 60                # claude only
+max_budget_usd = 5.0          # ceiling for a single claude run; codex reports no cost
 run_timeout_sec = 3600
+# The rest is claude only. Codex is guarded by its sandbox instead: the solver gets
+# workspace-write with no network (so no push, no gh), the reviewer read-only.
 permission_mode = "acceptEdits"
 allowed_tools = [
   "Read", "Edit", "Write", "Grep", "Glob", "TodoWrite",
@@ -31,15 +37,17 @@ issue_poll_sec = 60
 skip_labels = ["no-agent", "wontfix", "blocked", "question"]
 ci_timeout_sec = 1800         # a 5/5 PR must also pass CI; park if checks run longer than this
 only_labels = ["agent"]       # work only issues carrying one of these; [] = every open issue
+reviewer = "claude"           # "claude": a fresh read-only Sonnet (medium effort) session scores each round, nothing to install
+                              # "greptile": wait for the Greptile GitHub app's review instead
+target_score = 5              # the review score a PR needs before a human is asked to merge it
+fake_scores = []              # e.g. [3, 4, 5] to exercise the loop without any reviewer
 
-[greptile]
+[greptile]                    # for reviewer = "greptile"; poll_interval_sec also paces the CI wait
 bot_logins = ["greptile-apps[bot]", "greptile[bot]", "greptile-apps-staging[bot]"]
 poll_interval_sec = 20
 review_timeout_sec = 1200
 max_retriggers = 2
 retrigger_body = "@greptileai review"
-target_score = 5
-fake_scores = []              # e.g. [3, 4, 5] to exercise the loop without Greptile
 
 [safety]
 dry_run = false

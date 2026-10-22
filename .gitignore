@@ -220,3 +220,6 @@ __marimo__/
 # Looper local/live config (repo-specific, never checked in)
 looper.toml
 ideas.html
+
+# drafts of X posts, kept out of the repo
+x-posts.md

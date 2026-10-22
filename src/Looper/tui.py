@@ -25,13 +25,14 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .agent import tool_summary
-from .config import Config, ConfigError, load
+from .agent import codex_item_summary, make_agent, tool_summary
+from .config import Config, ConfigError, load, set_provider
 from .gh import GHError
 from .orchestrator import LABEL_NEEDS_HUMAN, Orchestrator
 from .state import State, Store, Task
@@ -42,7 +43,7 @@ log = logging.getLogger("looper.tui")
 REFRESH_MS = 2000
 LOG_MAXLINES = 2000
 LOG_MIN_HEIGHT = 5
-HELP = "j/k move  a start  d transcript  R repo  ? all keys  q quit"
+HELP = "j/k move  a start  d transcript  p provider  R repo  ? all keys  q quit"
 KEYS = [  # the ? overlay; keep in step with _loop
     ("j/k ↑/↓", "move between tasks"),
     ("a", "start the selected issue now"),
@@ -52,6 +53,7 @@ KEYS = [  # the ? overlay; keep in step with _loop
     ("c", "remove a finished task's worktree"),
     ("d", "read its agent transcripts in $PAGER"),
     ("D", "stop or start the daemon"),
+    ("p", "switch provider, claude ⇄ codex: new runs and looper.toml"),
     ("R", "switch repo"),
     ("PgUp/PgDn", "scroll the log"),
     ("?", "this list"),
@@ -332,6 +334,21 @@ def act(key: int, task: Task, store: Store, cfg: Config,
     return ""
 
 
+def switch_provider(cfg: Config, orch: Orchestrator) -> str:
+    """Flip [agent].provider between claude and codex, for the next agent runs and in
+    looper.toml. Runs already going finish on the provider they started with."""
+    new = "codex" if cfg.agent.provider == "claude" else "claude"
+    binary = cfg.agent.codex_bin if new == "codex" else cfg.agent.claude_bin
+    if not shutil.which(binary):
+        return f"provider: {binary} is not on PATH, staying on {cfg.agent.provider}"
+    cfg.agent.provider = new
+    orch.agent = make_agent(cfg.agent, dry_run=cfg.safety.dry_run)
+    orch.reviewer = make_agent(cfg.agent, dry_run=cfg.safety.dry_run, review=True)
+    if cfg.path:
+        cfg.path.write_text(set_provider(cfg.path.read_text(), new))
+    return f"provider: {new} from the next agent run"
+
+
 def _run_order(path: Path) -> tuple[int, str]:
     """'100-revise-100' after '99-revise-99': the iteration prefix grows past 2 digits."""
     iteration, _, kind = path.stem.partition("-")
@@ -339,8 +356,8 @@ def _run_order(path: Path) -> tuple[int, str]:
 
 
 def transcript(log_dir: Path) -> str:
-    """Every stream-json run in `log_dir`, oldest first, as readable text:
-    what the agent said, which tools it called, how each run ended."""
+    """Every run in `log_dir` (claude stream-json or codex app-server messages), oldest
+    first, as readable text: what the agent said, which tools it called, how each run ended."""
     out: list[str] = []
     for path in sorted(log_dir.glob("*.jsonl"), key=_run_order):
         out.append(f"══ {path.stem} ".ljust(72, "═"))
@@ -364,6 +381,18 @@ def transcript(log_dir: Path) -> str:
                            f"${msg.get('total_cost_usd') or 0.0:.2f}")
                 if msg.get("result"):
                     out.append(msg["result"])
+            elif msg.get("method") == "item/completed":
+                item = msg.get("params", {}).get("item") or {}
+                if item.get("type") == "agentMessage":
+                    out.append(item.get("text", ""))
+                elif summary := codex_item_summary(item):
+                    out.append(f"→ {summary}")
+            elif msg.get("method") == "turn/completed":
+                turn = msg.get("params", {}).get("turn") or {}
+                out.append(f"── {turn.get('status')}" +
+                           (f": {turn['error'].get('message')}" if turn.get("error") else ""))
+            elif isinstance(msg.get("error"), dict):  # codex refused a request, e.g. an unknown thread
+                out.append(f"── error: {msg['error'].get('message')}")
             elif msg.get("dry_run"):
                 out.append("[dry-run] no agent ran")
         out.append("")
@@ -410,7 +439,7 @@ def _draw(win, cfg: Config, tasks: list[Task], selected: int, status: str,
     table_bottom = max(3, h - log_h - 3)  # -3: detail line, log divider, footer
 
     daemon = "● on" if daemon_on else "○ OFF"
-    bar = f" looper  {cfg.repo.slug}   daemon {daemon}   {summary(tasks)}"
+    bar = f" looper  {cfg.repo.slug}   {cfg.agent.provider}   daemon {daemon}   {summary(tasks)}"
     put(0, 0, bar.ljust(w - 1), w - 1, curses.A_REVERSE | curses.A_BOLD)
     put(1, 0, HEADER, w - 1, curses.A_UNDERLINE)
     if not tasks:
@@ -474,6 +503,8 @@ def _loop(win, cfg: Config, store: Store, orch: Orchestrator,
             issue = tasks[selected].issue_number
             text = transcript(cfg.logs_dir / f"issue-{issue}")
             status = _page(win, text) if text else f"#{issue} no transcript yet"
+        elif key == ord("p"):
+            status = switch_provider(cfg, orch)
         elif key == ord("D"):
             if daemon_thread.is_alive():
                 loop.call_soon_threadsafe(orch.shutdown.set)

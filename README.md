@@ -3,9 +3,8 @@
 A daemon that turns open GitHub issues into merge-ready pull requests, watched from a TUI.
 
 For each open issue it spawns a Claude Code agent in its own git worktree, opens a PR,
-waits for [Greptile](https://greptile.com)'s review, and feeds the findings back to the
-agent — round after round — until Greptile's confidence score hits **5/5** and CI is
-green. Then it labels the PR `agent:ready` and stops. A human merges.
+has it reviewed, and feeds the findings back to the agent — round after round — until the
+review's confidence score hits **5/5** and CI is green. Then it labels the PR `agent:ready` and stops. A human merges.
 
 Several agents run at once, one worktree and branch each.
 
@@ -14,7 +13,7 @@ issue ──► claim ──► worktree ──► agent solves ──► push �
                                                             │
                           ┌─────────────────────────────────┘
                           ▼
-                    Greptile scores N/5 ──► 5/5 + CI green? ──► agent:ready (human merges)
+                    review scores N/5   ──► 5/5 + CI green? ──► agent:ready (human merges)
                           ▲                   │
                           └── agent revises ◄─┘   (up to max_iterations)
 ```
@@ -24,8 +23,10 @@ issue ──► claim ──► worktree ──► agent solves ──► push �
 - Python 3.11+ (no third-party dependencies)
 - [`gh`](https://cli.github.com/) authenticated with `repo` scope — Looper does *all*
   GitHub work through it
-- [`claude`](https://claude.com/claude-code) on `PATH` and logged in
-- The Greptile GitHub App installed on the target repo (if you dont add it the agent will continously wait for a review)
+- [`claude`](https://claude.com/claude-code) on `PATH` and logged in, or with
+  `agent.provider = "codex"`, [`codex`](https://github.com/openai/codex) logged in instead
+- Only with `loop.reviewer = "greptile"`: the [Greptile](https://greptile.com) GitHub App
+  installed on the target repo (without it, every task waits for a review that never comes)
 
 ## Install
 
@@ -35,7 +36,7 @@ Looper itself pulls in nothing else.
 **1. Clone it**
 
 ```bash
-git clone https://github.com/<you>/Looper.git
+git clone https://github.com/Tatsumi-03/Looper.git
 cd Looper
 ```
 
@@ -99,7 +100,7 @@ missing before anything touches a real repo.
 # rehearsal: no push, no PR, no comments
 ./looper once 123 --dry-run
 
-# exercise the whole revise loop without waiting on Greptile
+# exercise the whole revise loop without waiting on a reviewer
 ./looper once 123 --fake-review 3,4,5
 
 # the real thing
@@ -153,7 +154,13 @@ matters more than it sounds: repos whose contribution rules demand a test plan o
 evidence *in the description* are scored on it, and an agent with no channel to the body can
 never get past 4/5.
 
-**Reading the score.** Greptile posts its summary and `Confidence score: N/5` as a top-level
+**Who reviews.** `loop.reviewer = "claude"` (the default) needs nothing extra: each round a
+fresh Sonnet session at medium effort (whatever model the solver runs), allowed only to read and run `git diff`/`log`/`show`, reviews the branch
+against the issue and ends with `Confidence score: N/5`. Fresh every round, so it never grades
+work it remembers writing. Its review is posted on the PR and its cost counts toward the issue's
+budget. `loop.reviewer = "greptile"` waits for the Greptile GitHub app instead, as below.
+
+**Reading Greptile's score.** Greptile posts its summary and `Confidence score: N/5` as a top-level
 PR comment, sometimes as a formal review, and its findings as inline comments — Looper
 reads all three. A review only counts for the current round if it names the current head SHA
 or post-dates the push, so a stale verdict is never mistaken for a fresh one. If nothing
@@ -182,12 +189,29 @@ See `src/Looper/looper.toml.example` for every option. The ones worth knowing:
 | `loop.skip_labels` | `no-agent, wontfix, blocked, question` | issues the daemon ignores |
 | `loop.ci_timeout_sec` | 1800 | how long a 5/5 PR waits for checks before parking |
 | `loop.only_labels` | `agent` | issues must carry one to be worked; `[]` = every open issue |
+| `loop.reviewer` | `claude` | `greptile` to use the Greptile GitHub app instead of the built-in reviewer |
+| `agent.provider` | `claude` | `codex` to run Codex (see below) |
 | `agent.max_budget_usd` | 5.0 | ceiling per agent run |
 | `safety.max_cost_per_issue_usd` | 25.0 | ceiling per issue, across all rounds |
-| `greptile.target_score` | 5 | lower it to 4 if 5/5 proves unreachable |
-| `greptile.fake_scores` | `[]` | canned scores for testing the loop |
+| `loop.target_score` | 5 | lower it to 4 if 5/5 proves unreachable |
+| `loop.fake_scores` | `[]` | canned scores for testing the loop without a reviewer |
 | `safety.dry_run` | false | everything except push, PR and comments |
 | `safety.auto_merge` | false | deliberately unused: a human merges |
+
+## Codex
+
+With `agent.provider = "codex"` (or `p` in the TUI) each run is one `codex app-server` process: Looper starts
+or resumes a thread, sends the prompt as one turn, and stops when the turn completes.
+The built-in reviewer runs on Codex too, in a fresh read-only thread.
+
+Codex's sandbox replaces the tool lists: the solver gets `workspace-write` with no network,
+so it cannot push or reach GitHub, and nothing asks for approval. That sandbox also keeps
+`.git` read-only, so the agent can't commit; Looper commits what it leaves in the worktree.
+No network also means no `npm install` or `pip install` during a run. Codex reports no
+cost, so the dollar ceilings don't apply; `run_timeout_sec` still does. `agent.codex_model`
+picks the model (empty = Codex's default); `model` and the `[[repos]]` models stay Claude's.
+Switching provider mid-task starts the next round in a fresh session, since neither
+provider can resume the other's.
 
 ## Safety
 
@@ -212,10 +236,10 @@ src/Looper/
   state.py         SQLite store
   gh.py            every `gh` call
   worktree.py      base clone, per-issue worktrees, guarded push
-  agent.py         Claude Code headless driver
+  agent.py         Claude Code headless and Codex app-server drivers
   greptile.py      score parsing, freshness, re-trigger
   tui.py           curses dashboard; embeds the daemon in a background thread
-  prompts/         solve_issue.md, address_review.md
+  prompts/         solve_issue.md, address_review.md, review_pr.md
 var/               db, logs, worktrees, clones  (gitignored)
 ```
 
@@ -237,6 +261,7 @@ watching one. The task table is on top, a scrollable daemon log below it.
 | `c` | delete a finished task's worktree |
 | `d` | read the selected task's agent transcripts in `$PAGER` (default `less`) |
 | `D` | stop / restart the embedded daemon |
+| `p` | switch provider between Claude and Codex, for new agent runs; saved to `looper.toml` |
 | `PgUp` / `PgDn` | scroll the log; `PgDn` back to the bottom resumes following |
 | `q` | quit |
 
@@ -249,3 +274,7 @@ python -m venv .venv && .venv/bin/pip install pytest
 
 `tests/test_flow.py` runs the whole state machine against real git worktrees and a real
 local origin, with GitHub and Claude stubbed out — no network, no API spend.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

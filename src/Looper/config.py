@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 PERMISSION_MODES = {"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
+REVIEWERS = {"claude", "greptile"}
+PROVIDERS = {"claude", "codex"}
 
 
 class ConfigError(Exception):
@@ -32,8 +34,12 @@ class RepoCfg:
 
 @dataclass
 class AgentCfg:
+    provider: str = "claude"  # "codex": `codex app-server`, on the user's ChatGPT plan
     claude_bin: str = "claude"
-    model: str = "sonnet"
+    codex_bin: str = "codex"
+    model: str = "sonnet"  # claude's; a [[repos]] model replaces it
+    codex_model: str = ""  # empty = codex's default
+    effort: str = ""  # claude: low..max; codex: minimal..xhigh; empty = the provider's default
     max_turns: int = 60
     max_budget_usd: float = 5.0
     run_timeout_sec: int = 3600
@@ -52,6 +58,9 @@ class LoopCfg:
     skip_labels: list[str] = field(default_factory=lambda: ["no-agent", "wontfix", "blocked"])
     ci_timeout_sec: int = 1800  # how long a 5/5 PR may wait for checks before parking
     only_labels: list[str] = field(default_factory=lambda: ["agent"])  # empty = every open issue
+    reviewer: str = "claude"  # "claude": built in, no extra service; "greptile": the GitHub app
+    target_score: int = 5
+    fake_scores: list[int] = field(default_factory=list)  # canned scores instead of a reviewer
 
 
 @dataclass
@@ -61,8 +70,6 @@ class GreptileCfg:
     review_timeout_sec: int = 1200
     max_retriggers: int = 2
     retrigger_body: str = "@greptileai review"
-    target_score: int = 5
-    fake_scores: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -204,6 +211,23 @@ def upsert_repo(text: str, repo: RepoCfg) -> str:
     return text.rstrip("\n") + "\n\n" + block
 
 
+_PROVIDER = re.compile(r'^(provider[ \t]*=[ \t]*)"[^"]*"', re.M)
+
+
+def set_provider(text: str, provider: str) -> str:
+    """looper.toml text with [agent].provider set. Only that value changes; the line
+    is added under [agent] (or a new [agent]) when it isn't there yet."""
+    agent = re.search(r"^\[agent\][ \t]*$", text, re.M)
+    if agent is None:
+        return text.rstrip("\n") + f'\n\n[agent]\nprovider = "{provider}"\n'
+    nxt = re.search(r"^\[", text[agent.end():], re.M)
+    end = agent.end() + nxt.start() if nxt else len(text)
+    section, n = _PROVIDER.subn(rf'\g<1>"{provider}"', text[agent.end():end], count=1)
+    if not n:
+        section = f'\nprovider = "{provider}"' + section
+    return text[:agent.end()] + section + text[end:]
+
+
 def validate(cfg: Config) -> None:
     for repo in cfg.repos:
         if repo.slug.count("/") != 1 or not all(repo.slug.split("/")):
@@ -211,6 +235,9 @@ def validate(cfg: Config) -> None:
     slugs = [r.slug.lower() for r in cfg.repos]
     if len(slugs) != len(set(slugs)):
         raise ConfigError("the same repo appears twice in [[repos]]")
+    if cfg.agent.provider not in PROVIDERS:
+        raise ConfigError(f"agent.provider must be one of {sorted(PROVIDERS)}, "
+                          f"got {cfg.agent.provider!r}")
     if cfg.agent.permission_mode not in PERMISSION_MODES:
         raise ConfigError(
             f"agent.permission_mode must be one of {sorted(PERMISSION_MODES)}, "
@@ -220,11 +247,14 @@ def validate(cfg: Config) -> None:
         raise ConfigError("safety.branch_prefix must not be empty (it is the push guard)")
     if cfg.loop.max_concurrent_agents < 1:
         raise ConfigError("loop.max_concurrent_agents must be >= 1")
+    if cfg.loop.reviewer not in REVIEWERS:
+        raise ConfigError(f"loop.reviewer must be one of {sorted(REVIEWERS)}, "
+                          f"got {cfg.loop.reviewer!r}")
     if cfg.loop.max_iterations < 1:
         raise ConfigError("loop.max_iterations must be >= 1")
-    if not 0 <= cfg.greptile.target_score <= 5:
-        raise ConfigError("greptile.target_score must be 0..5")
-    for s in cfg.greptile.fake_scores:
+    if not 0 <= cfg.loop.target_score <= 5:
+        raise ConfigError("loop.target_score must be 0..5")
+    for s in cfg.loop.fake_scores:
         if not 0 <= s <= 5:
-            raise ConfigError("greptile.fake_scores entries must be 0..5")
+            raise ConfigError("loop.fake_scores entries must be 0..5")
     assert is_dataclass(cfg)
